@@ -147,11 +147,15 @@ function cooperation(path) {
   }
   for (const event of events) {
     if (event.type !== 'assistant/message') continue
+    // Only reasoning counts. Prose that merely mentions the contract -- a
+    // reply discussing this plugin, for instance -- would otherwise be read as
+    // the model answering it, which inflates the cooperation rate with the
+    // words of whoever was talking about the feature.
     const joined = (event.data?.message?.content ?? [])
-      .filter(block => block?.type === 'text' || block?.type === 'reasoning')
+      .filter(block => block?.type === 'reasoning')
       .map(block => block.text)
       .join('\n')
-    if (/(?:^|\n)\s*keep:/i.test(joined)) answered += 1
+    if (/(?:^|\n)\s*keep:\s*\d/i.test(joined)) answered += 1
   }
   return { numbered, answered }
 }

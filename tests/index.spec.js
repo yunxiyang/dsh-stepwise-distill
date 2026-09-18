@@ -11,7 +11,7 @@ import {
   resolveConfig,
   toolNameOf,
 } from '../src/index.js'
-import { contractSection } from '../src/distill.js'
+import { contractSection, numberLines, parseKeep } from '../src/distill.js'
 
 const text = value => ({ type: 'text', text: value })
 const reasoning = value => ({ type: 'reasoning', text: value })
@@ -168,11 +168,26 @@ describe('keep source', () => {
   it('stops at the next human turn instead of reaching past it', () => {
     const events = log({ keep: '3' })
     events.splice(3, 0, { seq: 3, type: 'user/message', data: { content: [text('hi')] } })
-    expect(findKeepSource(events, 2)).toBeNull()
+    expect(findKeepSource(events, 2)).toEqual([])
   })
 
-  it('returns null when nothing answered', () => {
-    expect(findKeepSource(log({ answered: false }), 2)).toBeNull()
+  it('returns nothing when the turn ended before any answer', () => {
+    expect(findKeepSource(log({ answered: false }), 2)).toEqual([])
+  })
+
+  it('keeps scanning past an assistant message that said nothing about keeping', () => {
+    // The real shape: read a result, act on it, and only then name the lines
+    // worth keeping. Stopping at the first reply would lose that decision.
+    const events = log({ keep: '3' })
+    events.splice(3, 0, {
+      seq: 3,
+      type: 'assistant/message',
+      data: { turn: 1, step: 2, message: { role: 'assistant', content: [text('reading it now')] } },
+    })
+    events[4].seq = 4
+    const blocks = findKeepSource(events, 2)
+    expect(blocks).toEqual([text('reading it now'), reasoning('plan\nkeep: 3')])
+    expect(parseKeep(blocks).indices).toEqual([3])
   })
 })
 
@@ -230,6 +245,21 @@ describe('distillation plan', () => {
   it('honours a zero-index range by refusing it', () => {
     const events = log({ keep: '0' })
     expect(planDistillation(events[2], events, CONFIG).skip).toBe('malformed-keep-line')
+  })
+
+  it('reuses numbering already present in the result', () => {
+    // A durable post-execute rewrite means the log holds numbered text. The
+    // plan must read the existing numbers, not add a second set: the model
+    // chose its indices from those.
+    const numberedText = numberLines(LONG)
+    const events = log({ result: numberedText, keep: '3,7' })
+    const plan = planDistillation(events[2], events, CONFIG)
+    expect(plan.skip).toBeUndefined()
+    expect(plan.totalLines).toBe(40)
+    expect(plan.replacement).toContain('3: row 3; 7: row 7')
+    // The kept facts carry the original text without a stacked prefix.
+    expect(plan.replacement).not.toContain('[3]')
+    expect(plan.replacement).not.toContain('[7]')
   })
 })
 

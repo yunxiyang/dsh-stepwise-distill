@@ -27,6 +27,8 @@ import {
   contractSection,
   distillMarker,
   isDistilled,
+  isLongEnough,
+  isNumbered,
   numberLines,
   numberingContract,
   parseKeep,
@@ -204,28 +206,34 @@ export function isEligible(event, config, events) {
   const leaves = textLeaves(event.data?.message)
   if (leaves.length === 0) return false
   if (shouldSkip(toolNameOf(event, events), config)) return false
-  return leaves.some(leaf => shouldNumber(leaf.text, config.minLines))
+  return leaves.some(leaf => isLongEnough(leaf.text, config.minLines))
 }
 
 /**
- * Find the assistant message that answered one tool result.
+ * Collect the blocks of every assistant message that answered one tool result.
  *
- * The `keep:` contract is produced by the step that consumed the result, i.e.
- * the next assistant message after it and before the next human turn.
+ * The contract is emitted by the model after it has seen the result, and the
+ * model is free to take several steps before deciding: it may read, act, and
+ * only then say which lines matter. The window therefore runs from the result
+ * until the next human turn, and every assistant message in it contributes its
+ * blocks. Stopping at the first one would miss a decision made two steps later,
+ * which is exactly the common shape of "read, then act, then keep".
  *
  * @param events - the full event log.
  * @param seq - the result event's sequence number.
- * @returns the answering assistant message's blocks, or null.
+ * @returns the contributing blocks, empty when the turn ended first.
  */
 export function findKeepSource(events, seq) {
+  const blocks = []
   // Sequence numbers are sparse in older session formats, so the scan follows
   // log order and compares seqs rather than assuming seq equals an index.
   for (const event of events) {
     if (event?.seq === undefined || event.seq <= seq) continue
-    if (event?.type === 'user/message') return null
-    if (event?.type === 'assistant/message') return event.data?.message?.content ?? null
+    if (event?.type === 'user/message') break
+    if (event?.type !== 'assistant/message') continue
+    blocks.push(...(event.data?.message?.content ?? []))
   }
-  return null
+  return blocks
 }
 
 /**
@@ -244,12 +252,12 @@ export function planDistillation(event, events, config) {
   if (!isEligible(event, config, events)) return { skip: 'ineligible' }
 
   const leaves = textLeaves(event.data.message)
-  const target = leaves.find(leaf => shouldNumber(leaf.text, config.minLines))
+  const target = leaves.find(leaf => isLongEnough(leaf.text, config.minLines))
   if (target === undefined) return { skip: 'no-long-leaf' }
   if (isDistilled(target.text)) return { skip: 'already-distilled' }
 
   const blocks = findKeepSource(events, event.seq)
-  if (blocks === null) return { skip: 'no-keep-source' }
+  if (blocks.length === 0) return { skip: 'no-keep-source' }
 
   const { found, indices, malformed } = parseKeep(blocks)
   if (!found) return { skip: 'no-keep-line' }
@@ -259,7 +267,11 @@ export function planDistillation(event, events, config) {
   // node keeps its original text.
   if (indices.length === 0) return { skip: 'empty-keep-line' }
 
-  const lines = splitLines(numberLines(target.text))
+  // The result may already carry the numbering written by an earlier
+  // post-execute pass, which is durable in the log. Re-numbering it would
+  // stack prefixes and shift every index the model chose from, so the
+  // existing numbering is reused as-is.
+  const lines = isNumbered(target.text) ? splitLines(target.text) : splitLines(numberLines(target.text))
   const inRange = indices.filter(index => index >= 1 && index <= lines.length)
   if (inRange.length !== indices.length) return { skip: 'index-out-of-range' }
 

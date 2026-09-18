@@ -63,7 +63,45 @@ export function numberLines(text) {
  */
 export function shouldNumber(text, minLines) {
   if (typeof text !== 'string' || text.length === 0) return false
+  if (isNumbered(text)) return false
+  return isLongEnough(text, minLines)
+}
+
+/**
+ * Whether a result is long enough to be worth distilling.
+ *
+ * Separate from {@link shouldNumber}, because the two questions differ once a
+ * durable numbering exists in the log: numbering happens once, while
+ * distillation is decided later by the model's `keep:` line. A numbered result
+ * that correctly skips `shouldNumber` must still be eligible to distill.
+ *
+ * @param text - candidate result text.
+ * @param minLines - line threshold from the plugin config.
+ * @returns true when the result exceeds the threshold.
+ */
+export function isLongEnough(text, minLines) {
+  if (typeof text !== 'string' || text.length === 0) return false
   return splitLines(text).length > minLines
+}
+
+/**
+ * Whether a result already carries this plugin's numbering.
+ *
+ * Numbering is persisted: the `tools/post-execute` rewrite lands in the session
+ * log, so every later read of that result sees the numbers as part of its text.
+ * Without this check a result would be numbered again on each pass, stacking
+ * `[9] [9] service_005` and corrupting the indices the model refers to.
+ *
+ * @param text - candidate result text.
+ * @returns true when the text looks already numbered.
+ */
+export function isNumbered(text) {
+  if (typeof text !== 'string') return false
+  const lines = splitLines(text)
+  if (lines.length < 2) return false
+  // A numbering pass covers every line, so consecutive prefixes are what
+  // distinguish real numbering from output that happens to start with one.
+  return lines.slice(0, 3).every((line, index) => line.startsWith(`[${index + 1}] `))
 }
 
 /**

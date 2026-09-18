@@ -4,6 +4,7 @@ import {
   buildDistilledText,
   contractSection,
   isDistilled,
+  isNumbered,
   numberLines,
   parseIndices,
   parseKeep,
@@ -38,6 +39,20 @@ describe('line numbering', () => {
   it('never numbers empty content', () => {
     expect(shouldNumber('', 1)).toBe(false)
     expect(shouldNumber(undefined, 1)).toBe(false)
+  })
+
+  it('never numbers a result that already carries numbering', () => {
+    // The rewrite is durable: it lands in the session log, so the next pass
+    // reads the numbers as part of the text. Numbering again would stack
+    // prefixes and shift every index the model refers to.
+    const once = numberLines(Array.from({ length: 30 }, (_, i) => `row ${i}`).join('\n'))
+    expect(isNumbered(once)).toBe(true)
+    expect(shouldNumber(once, 20)).toBe(false)
+  })
+
+  it('does not mistake content that merely starts with a bracket', () => {
+    expect(isNumbered('[note] first\nplain second\nplain third')).toBe(false)
+    expect(isNumbered('[1] only one line')).toBe(false)
   })
 })
 
