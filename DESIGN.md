@@ -85,8 +85,10 @@ if (event.type === "assistant/message" && raw !== void 0)
 | 层 | 改什么 | 落点 | 官方支持度 |
 |---|---|---|---|
 | **L1 工具结果瘦身** | 日志层 replace `tool/result` 的 content | `agent/pre-step` + `session.append` | 一等公民(§3.2) |
-| **L2 输出噪声剥离** | 发出前的字节:reasoning、keep 行、参数精简 | 传输层(`llm/stream` + fetch 改写) | 官方预留降级路径(§8) |
+| ~~**L2 输出噪声剥离**~~ | ~~发出前的字节:reasoning、keep 行~~ | ~~传输层~~ | **已证伪,见 §8** |
 | **L3 原文取回** | 给模型读回日志原文的入口 | 新工具 `history_read` | 自建 |
+
+**只剩两层。** L2 的设想被宿主的不变量检查否掉(§8),reasoning 与 `keep:` 行都无法在发出前改写。`keep:` 契约因此改为**优先落在 reasoning 块里** —— 让它在模型自己下一轮被 provider 侧自然丢弃,而不是靠我们事后清洗。
 
 ---
 
@@ -197,28 +199,60 @@ full: session seq 8412 (history_read)
 
 ---
 
-## 8. L2 传输层
+## 8. L2 传输层(已证伪,不做)
 
-### 8.1 为什么安全
+**结论:在当前宿主上无法实现。原方案的两件事都不能落在传输层。**
 
-`dsh-llm-pi-ai/lib/index.js:229`:
+原设想是拦 `llm/stream`,剥掉历史 reasoning 与 `keep:` 行。宿主对这个位置有运行时检查,不是风格约定。
 
-> Durable content is the authoritative record; replay metadata only restores native fidelity (ids, signatures). A replay state this build cannot use — another adapter's kind, another version, a malformed value, or **metadata that no longer matches the content** — therefore degrades the one message to provider-neutral history instead of failing the request.
+### 8.1 证据一:主循环请求必须逐字等于 surface 投影
 
-surface 投影出的 `content` 是权威,`replayState` 只管 ids 与签名;内容被改写导致元数据不匹配时**自动降级**,不会让请求失败。官方为"内容被外部重写"预留了路径。
+`packages/core/agent-loop/src/invariant.ts:21-42`:
 
-### 8.2 做四件事
+```js
+ctx.on('llm/stream', (options: GenerateOptions, next) => {
+  if (!isAgentLoopRequest(options)) return next()
+  if (!Object.isFrozen(options)) fail('a loop-built request must be frozen')
+  if (!Object.isFrozen(options.messages)) {
+    fail('a loop-built request must carry a frozen messages array')
+  }
+  const expected = session.deriveMessages()
+  if (JSON.stringify(options.messages) !== JSON.stringify(expected)) {
+    fail(`llm request for session "${String(session.id)}" diverges from the
+          dispatch-time durable derivation (log-reconstruction desync)`)
+  }
+```
 
-1. **剥 reasoning**:去掉非最近一条 assistant 消息的 reasoning 块。
-   - deepseek 路线:适配器无签名逻辑(`dsh-llm-deepseek/lib/index.js` 无 `replayState`/`signature`),直接剥;
-   - pi-ai 路线:连带清理 `blocks` 元数据,依赖 §8.1 的降级路径。
-2. **清洗 keep 行**:历史里残留的 `keep:` 行从 text 块移除。日志留作审计,**请求里永不出现**。
-3. **(可选)精简 tool-call 参数**:把历史里 apply_patch 的完整补丁、exec_command 的完整命令替换为一行描述。这是 §3.1 约束下唯一可行的位置。
-4. **确定性**:同一历史位置每轮产出同样结果。任何随机或"这次压那次不压"的策略都会打断前缀缓存。
+`InvariantFailure` 的类型是 `(message: string) => never`(`packages/runtime-diagnostics/invariants/src/index.ts:29`)——它**抛异常**,不是记日志。任何对 `messages` 的改写都会让请求直接失败。
 
-### 8.3 必须保持的性质
+### 8.2 证据二:官方注释明写"只读"
 
-沿用 `src/remote.ts` 的模式:幂等、可回退、失败时用未改写的原请求重发。日志与实际发出的字节不一致是这条路线的固有代价,必须靠"改写规则纯函数化"来控制。
+`packages/llm/llm/src/index.ts:60-72`:
+
+> the full request. A LOOP-built request carries the process-local `markAgentLoopRequest` identity and arrives **deep-frozen (mutation throws)**: its content is a pure function of the session log (the reconstructability Agent Note), so listeners **read it, never rewrite it**.
+
+主循环在 `packages/core/agent-loop/src/agent.ts:603-616` 用 `deepFreeze` 冻结每条消息、`Object.freeze` 冻结数组后再发出。
+
+### 8.3 证据三:投影规则没有扩展点
+
+`Surface` 只有四种事件(`packages/core/session/src/surface.ts:22-27`),投影是**纯函数** `deriveEventMessage`,由 `Session.deriveMessages()`(`packages/core/session/src/index.ts:825`)折叠,没有任何钩子或可注入的投影器。
+
+### 8.4 原文错在哪
+
+§8.1 曾引用 `dsh-llm-pi-ai/lib/index.js:229` 的"元数据不匹配则降级",推出"官方为内容被外部重写预留了路径"。那段讲的是 **adapter 内部的 replay 元数据**(ids/signature)容错,管的是适配器自己能否复用 native 状态;**它不解除上层的不变量**。两件事被接错了。
+
+### 8.5 对方案的影响
+
+L2 想省的两块,现在只剩一条窄路:
+
+- **reasoning**:占回传量 10.6%(实测 119 个会话,单会话最高 35.7%)。要在日志层去掉,得改 `assistant/message`,而这被 §3.1 禁止 —— **无解,放弃**。
+- **`keep:` 行**:它进的是 `assistant/message` 的 text 块,同一禁令。**因此契约必须落在 reasoning 块里**,让它在模型自己下一轮被 provider 侧自然丢弃,而不是靠我们事后清洗。
+
+**代价:** reasoning 会继续按原样回传。这是方案的可接受损失 —— 收益主体是工具结果(50.0%),那部分走 L1,不受影响。
+
+### 8.6 仍然成立的做法
+
+`llm/stream` 作为**只读观测点**仍然可用:可以数 token、记录 reasoning 占比、判断某轮是否遵守了 `keep:` 契约。本插件的 P0 观测口径因此可以搬到运行时,而不只是离线脚本。
 
 ---
 
@@ -260,12 +294,14 @@ surface 投影出的 `content` 是权威,`replayState` 只管 ids 与签名;内�
 | 阶段 | 内容 | 风险 |
 |---|---|---|
 | **P0 基线** | 把测量脚本(`unzstd.mjs` 逐帧解 zstd + 按 surface 类型聚合)移入 `scripts/`,加 token 口径,记录 surface/turn 曲线 | 无 |
-| **P1 L2** | 传输层剥 reasoning + 清洗 keep 行(此时还没人产出 keep 行,纯赚) | 低;pi-ai 需验签名降级 |
+| ~~**P1 L2**~~ | ~~传输层剥 reasoning + 清洗 keep 行~~ **已证伪(§8),取消** | — |
 | **P2 L1 上半** | post-execute 加编号 + 提示词加输出契约,**只观测不删**,评估模型标记质量 | 低;需验证 `finalizeContent` 不改写我们的编号 |
 | **P3 L1 下半** | 打开 replace,先只处理 `exec_command`/`read`;上线 `history_read` | 中;不可逆,靠取回兜底 |
 | **P4 扩展** | 扩到 apply_patch / 子 agent 结果;决定是否彻底摘掉 `dsh-compaction-basic` | 中 |
 
 **每个阶段同时看两个指标:省了多少 token、任务成功率有没有掉。** 只看 token 会一路滑向"删掉关键信息"的降智结局。
+
+**P1 取消后的路线变化:** reasoning 无法剥离(§8),它会继续按原样回传。收益因此全部压在本方案的核心落点 L1 上 —— 工具结果占回传量 50.0%,且 84.3% 的结果字节落在可编号范围内。这反而让优先级更清楚:**P3 是收益主体,P2 是它的必要前置**(没有编号,模型不会产出 `keep:` 行)。
 
 ---
 
@@ -273,8 +309,8 @@ surface 投影出的 `content` 是权威,`replayState` 只管 ids 与签名;内�
 
 1. `tools/post-execute` 位于 `finalizeContent` **之前**;返回 `{kind:'accept', content}` 后的编号是否会被 `finalizeContent` 覆盖。
 2. `replaceGeneration` 每次 replace 递增 → 下一个请求被判为"新请求序列" → 提示词协调从 `in-history` 追加退化为归并到节点 0(`dsh-agent-loop/lib/index.js`,`step()` 与 `buildRequest()` 里的 `startsSeries` 判定)。提示词稳定时无害;每轮变化时这个优化就废了。
-3. pi-ai 路线下改写 assistant 内容触发的 replay 降级,是否在长会话里产生可观测的副作用(诊断日志量、签名校验失败率)。
-4. 模型对 `keep:` 契约的实际遵循率(决定 P2 是否值得继续)。
+3. 模型对 `keep:` 契约的实际遵循率(决定 P2 是否值得继续)。
+4. §8.5 判定 reasoning 无解,前提是"日志层不能改 `assistant/message`"(§3.1)。若未来版本给 surface 投影开了扩展点,这一条需要重新评估。
 
 ---
 
@@ -301,3 +337,15 @@ surface 投影出的 `content` 是权威,`replayState` 只管 ids 与签名;内�
 | `CompactionEngine` 接口形状 | `dsh-compaction/lib/types/index.d.ts` |
 | 压缩范围端点须 balanced | 同上 `compactRange` 文档 |
 | BlockAssembler:max-tokens 丢 tool call;已关闭 index 忽略 delta | `dsh-llm/lib/types/assembler.d.ts` |
+
+### L2 证伪的证据(§8,取自源码检出 `dsh-v0.1.5-alpha.1-262-gb2e3b2a012`)
+
+| 事实 | 位置 |
+|---|---|
+| 主循环请求必须逐字等于 `session.deriveMessages()` | `packages/core/agent-loop/src/invariant.ts:39-42` |
+| `llm/stream` 请求深冻结,监听者只读 | `packages/llm/llm/src/index.ts:60-72` |
+| 该检查 `prepend: true`,先于任何能短路它的监听器 | `packages/core/agent-loop/src/invariant.ts:73` |
+| `InvariantFailure` 抛异常(`=> never`) | `packages/runtime-diagnostics/invariants/src/index.ts:29` |
+| surface 只有四种事件类型,无投影扩展点 | `packages/core/session/src/surface.ts:22-27` |
+| 投影是纯函数,`deriveMessages` 直接折叠它 | `packages/core/session/src/index.ts:825,838` |
+| 主循环 `deepFreeze` 每条消息后再发出 | `packages/core/agent-loop/src/agent.ts:603-616` |
