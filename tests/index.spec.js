@@ -3,6 +3,7 @@ import {
   apply,
   inject,
   PROMPT_SECTION,
+  REASONING_SECTION,
   findKeepSource,
   isEligible,
   planDistillation,
@@ -76,8 +77,15 @@ describe('config', () => {
 
   it('accepts overrides and keeps every other default', () => {
     expect(resolveConfig({ mode: 'distill', minLines: 5 })).toEqual({
-      mode: 'distill', minLines: 5, tools: [], debug: false,
+      mode: 'distill', minLines: 5, reasoningContract: true, tools: [], debug: false,
     })
+  })
+
+  it('lets the conclusion contract be switched off independently', () => {
+    // It is the part under measurement, so it has to be separable from
+    // numbering: otherwise a run cannot tell which instruction moved a number.
+    expect(resolveConfig({ reasoningContract: false }).reasoningContract).toBe(false)
+    expect(resolveConfig({ reasoningContract: false }).minLines).toBe(20)
   })
 })
 
@@ -378,12 +386,17 @@ describe('mounting', () => {
       logger: { info: vi.fn(), warn: vi.fn() },
     }
     apply(ctx, {})
-    expect(sections).toHaveLength(1)
-    expect(sections[0].name).toBe(PROMPT_SECTION)
-    expect(sections[0].text()).toContain('keep: ???')
+    const names = sections.map(section => section.name)
+    expect(names).toContain(PROMPT_SECTION)
+    expect(names).toContain(REASONING_SECTION)
+    const contract = sections.find(section => section.name === PROMPT_SECTION)
+    expect(contract.text()).toContain('keep: ???')
   })
 
-  it('asks for no prompt text once numbering is off', () => {
+  it('asks for the written-conclusion contract on every step', () => {
+    // Separate from numbering on purpose: a conclusion is worth recording
+    // whether or not anything was numbered, and this instruction is the one
+    // under measurement.
     const sections = []
     const ctx = {
       on: () => {},
@@ -391,7 +404,20 @@ describe('mounting', () => {
       logger: { info: vi.fn(), warn: vi.fn() },
     }
     apply(ctx, { minLines: 0 })
-    expect(sections[0].text()).toBe('')
+    const reasoning = sections.find(section => section.name === REASONING_SECTION)
+    expect(reasoning.text()).toContain('NOT kept between steps')
+  })
+
+  it('asks for no numbering text once numbering is off', () => {
+    const sections = []
+    const ctx = {
+      on: () => {},
+      systemPrompt: { section: value => sections.push(value) },
+      logger: { info: vi.fn(), warn: vi.fn() },
+    }
+    apply(ctx, { minLines: 0 })
+    const contract = sections.find(section => section.name === PROMPT_SECTION)
+    expect(contract.text()).toBe('')
   })
 
   it('survives a prompt service that rejects the section', () => {
@@ -741,5 +767,69 @@ describe('history_read', () => {
     // model fetched to escape an index, inviting it to keep: numbers that
     // belong to a renumbered copy rather than to the original result.
     expect(SELF_NUMBERED_TOOLS).toContain('history_read')
+  })
+})
+
+describe('reasoning strip installation', () => {
+  /** Minimal session double with a deriveMessages method. */
+  function sessionWith(messages) {
+    return { deriveMessages: () => messages }
+  }
+
+  /** Run one pre-step so the install path executes. */
+  async function step(agent, config = {}) {
+    const registered = []
+    const ctx = {
+      on: (event, handler) => registered.push([event, handler]),
+      systemPrompt: { section: () => {} },
+      inject: () => {},
+      logger: { info: vi.fn(), warn: vi.fn() },
+    }
+    apply(ctx, config)
+    const preStep = registered.find(([event]) => event === 'agent/pre-step')[1]
+    await preStep({ agent, turn: 1, step: 1 }, () => Promise.resolve({ kind: 'enter' }))
+    return ctx
+  }
+
+  it('strips reasoning from the session projection', async () => {
+    const session = sessionWith([
+      { role: 'user', content: [text('go')] },
+      { role: 'assistant', content: [reasoning('churn'), text('done')] },
+    ])
+    await step({ session })
+    expect(session.deriveMessages()).toEqual([
+      { role: 'user', content: [text('go')] },
+      { role: 'assistant', content: [text('done')] },
+    ])
+  })
+
+  it('leaves the log-side projection alone when switched off', async () => {
+    const session = sessionWith([{ role: 'assistant', content: [reasoning('churn'), text('done')] }])
+    await step({ session }, { reasoningContract: false })
+    expect(session.deriveMessages()[0].content).toHaveLength(2)
+  })
+
+  it('wraps at most once across repeated steps', async () => {
+    // A wrapper per step would strip the same list N times and grow the call
+    // stack with the session's length.
+    const session = sessionWith([{ role: 'assistant', content: [reasoning('churn'), text('done')] }])
+    const registered = []
+    const ctx = {
+      on: (event, handler) => registered.push([event, handler]),
+      systemPrompt: { section: () => {} },
+      inject: () => {},
+      logger: { info: vi.fn(), warn: vi.fn() },
+    }
+    apply(ctx, {})
+    const preStep = registered.find(([event]) => event === 'agent/pre-step')[1]
+    for (let i = 0; i < 5; i += 1) {
+      await preStep({ agent: { session }, turn: 1, step: i + 1 }, () => Promise.resolve({ kind: 'enter' }))
+    }
+    expect(session.deriveMessages()).toEqual([{ role: 'assistant', content: [text('done')] }])
+  })
+
+  it('keeps working when the session has no projection to wrap', async () => {
+    await expect(step({})).resolves.toBeDefined()
+    await expect(step(undefined)).resolves.toBeDefined()
   })
 })

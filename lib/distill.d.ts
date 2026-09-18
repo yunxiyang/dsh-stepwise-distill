@@ -90,6 +90,15 @@ export declare function numberingContract(eligibleCount: number): string
 /** Render the system-prompt section announcing the contract. */
 export declare function contractSection(minLines: number): string
 
+/** Render the system-prompt section asking for a conclusion each step. */
+export declare function reasoningContract(): string
+
+/** Remove reasoning blocks from one projected message, or null when nothing else remains. */
+export declare function stripReasoning(message: unknown): unknown | null
+
+/** Apply {@link stripReasoning} across one projected message list. */
+export declare function stripReasoningFrom(messages: unknown): unknown
+
 /** Whether a leaf text is worth keeping in the distilled form. */
 export declare function isSubstantive(text: unknown): boolean
 

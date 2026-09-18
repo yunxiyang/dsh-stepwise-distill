@@ -19,8 +19,17 @@ export declare const DEFAULT_MODE: 'observe'
 /** Prompt section name carrying the keep-contract instructions. */
 export declare const PROMPT_SECTION: 'stepwise-distill:contract'
 
+/** Prompt section name carrying the written-conclusion instructions. */
+export declare const REASONING_SECTION: 'stepwise-distill:reasoning'
+
+/** Non-enumerable marker recording that a session's projection is wrapped. */
+export declare const REASONING_STRIPPED: symbol
+
 /** Sort order placing the contract after the harness-source and web-surface notes. */
 export declare const PROMPT_SECTION_ORDER: 10250
+
+/** Sort order placing the conclusion instructions just after the contract. */
+export declare const REASONING_SECTION_ORDER: 10251
 
 /** Services read when the running profile provides them. */
 export declare const optionalInject: ['commands', 'tools']
@@ -61,6 +70,8 @@ export interface Config {
   mode?: 'observe' | 'distill'
   /** Only results longer than this many lines are numbered. */
   minLines?: number
+  /** Ask the model to write a conclusion into its reply at the end of each step. */
+  reasoningContract?: boolean
   /** Tool names whose results may be distilled; empty means every tool. */
   tools?: string[]
   /** Emit a diagnostic line for every hook evaluation. */
@@ -71,6 +82,7 @@ export interface Config {
 export interface ResolvedConfig {
   mode: 'observe' | 'distill'
   minLines: number
+  reasoningContract: boolean
   tools: string[]
   debug: boolean
 }

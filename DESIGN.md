@@ -256,6 +256,29 @@ full: session seq 125 (history_read)
 
 ---
 
+### 6.4 结论契约:要求模型把结论写下来
+
+reasoning 可以被剥除(§8.6),**前提是结论已经有别的落点**。实测支持的这一前提:
+
+```
+turn 4 step 4: reasoning 20990 B, text 99 B
+turn 2 step 5: reasoning 17895 B, text 146 B
+```
+
+中途步骤的正文是 0–56 字节(过渡语),**全部结论都沉在数 KB 的 reasoning 里**。直接剥掉 = 模型下一轮不知道自己刚才干了什么、为什么这么干。
+
+所以契约要求:每完成一个实质步骤,在回复里写下**结论、原因、证据**。三个刻意的措辞选择:
+
+- **先说后果,再提要求。** 文本契约唯一的杠杆是"不做的代价",所以第一句就把它讲清楚、讲成事实陈述而非威胁 —— 模型得相信它才会照做;
+- **"a sentence or two, not a retelling"** —— 明确禁止复述过程,复述过程等于把内耗搬回来;
+- **"including steps where the conclusion is that something did or did not work"** —— 失败步骤最容易被跳过,而那恰恰是最贵的(不记下来,下轮还会重试同一条死路)。
+
+**它与编号契约分离**:独立的 section、独立的配置项(`reasoningContract`,默认开)。理由有两条 —— 它适用于**每一步**(编号契约只在有长结果时生效),而且它是**被测对象**,必须能单独关掉,否则测出变化时分不清是哪条指令起的作用。
+
+**一个已知的强度上限。** 这是纯文本契约,和 §6.2 同理:**强制力只来自措辞与后果,没有任何协议层校验**。它比 `keep:` 还弱一层 —— `keep:` 有"默认删除"兜底,而"结论不会被保留"目前**只是承诺**:契约说了后果,但剥离是独立实现的,模型不写也不会立刻受罚。
+
+如果遵循率不足,唯一有 schema 强制力的通道是**用工具承载结论**(参数必填 → 模型绕不过去,已在 `history_read` 上验证过 `defineTool` 的入口校验)。代价是每步多一次工具往返。这是本案的下一个候选。
+
 ## 7. L1 固化算法(在 `agent/pre-step` 中)
 
 1. **选目标**:遍历 `session.surface.nodes`,取满足以下条件的 `tool/result` 节点:
@@ -328,11 +351,11 @@ full: session seq 125 (history_read)
 
 ---
 
-## 8. L2 传输层(已证伪,不做)
+## 8. L2 传输层:拦 `llm/stream` 是错的入口(已证伪)
 
-**结论:在当前宿主上无法实现。原方案的两件事都不能落在传输层。**
+**结论:拦 `llm/stream` 无法实现,但 reasoning 剥除本身可以实现 —— 入口是投影层,不是传输层(§8.6)。**
 
-原设想是拦 `llm/stream`,剥掉历史 reasoning 与 `keep:` 行。宿主对这个位置有运行时检查,不是风格约定。
+原设想是拦 `llm/stream`,剥掉历史 reasoning 与 `keep:` 行。宿主对这个位置有运行时检查,不是风格约定。下面两节记录为什么这个入口是错的;它们**仍然成立**,但当年由此推出的"reasoning 剥除无解"是**过宽的推广**,§8.6 给出修正。
 
 ### 8.1 证据一:主循环请求必须逐字等于 surface 投影
 
@@ -370,30 +393,63 @@ ctx.on('llm/stream', (options: GenerateOptions, next) => {
 
 §8.1 曾引用 `dsh-llm-pi-ai/lib/index.js:229` 的"元数据不匹配则降级",推出"官方为内容被外部重写预留了路径"。那段讲的是 **adapter 内部的 replay 元数据**(ids/signature)容错,管的是适配器自己能否复用 native 状态;**它不解除上层的不变量**。两件事被接错了。
 
-### 8.5 对方案的影响
+### 8.5 对方案的影响,以及本节当年的一个误读
 
-L2 想省的两块,现在只剩一条窄路:
+当年由 §8.1–8.4 推出的结论是:
 
-- **reasoning**:占回传量 10.6%(实测 119 个会话,单会话最高 35.7%)。要在日志层去掉,得改 `assistant/message`,而这被 §3.1 禁止 —— **无解,放弃**。
-- **`keep:` 行**:它进的是 `assistant/message` 的 text 块,同一禁令。**因此契约必须落在 reasoning 块里**,让它在模型自己下一轮被 provider 侧自然丢弃,而不是靠我们事后清洗。
+- **reasoning**:要在日志层去掉,得改 `assistant/message`,而这被 §3.1 禁止 —— **无解,放弃**。
+- **`keep:` 行**:同一禁令,**因此契约必须落在 reasoning 块里**。
 
-**代价与补偿:** reasoning 仍留在日志里并随请求发出,但**官方规则让它在多数轮次不产生实际成本**。`packages/llm/llm-deepseek/src/serialize.ts:225-233`:
+其中"契约放 reasoning"这条**仍然成立**(§8.6 说明它现在还有第二重理由)。但"reasoning 无解"这条是**过宽的推广**,因为它把两件事混成了一件:
+
+| 真命题 | 被错误推广成 |
+|---|---|
+| `assistant/message` 不能带 `sourceEventSeqs`(§3.1) | `assistant/message` 不能被改造 |
+| 因此 **`replace` 无法遮蔽 assistant 消息** | 因此 **reasoning 无法被丢弃** |
+
+`replace` 只是丢弃的一种手段,不是唯一手段。§8.6 给出另一条。
+
+**另一处需要更正的事实:** 本节曾写道 reasoning"只在 tool-call 轮被 provider 要求回传,其他轮被忽略",并据此认为缺口的代价有限。代码并不支持"被忽略"这个读法 —— 适配器是**无条件拼接**的:
 
 ```js
-// CoT passback on every reasoning-carrying turn. The official rule
-// (guides/thinking_mode.mdx) requires it on tool-call turns and ignores it
-// elsewhere; a gateway re-encoding the conversation for another vendor
-// recovers that turn's upstream thinking signature by hashing this exact
-// text, which a tool-call-free turn carries nowhere else.
+// packages/llm/llm-deepseek/src/serialize.ts
 ...reasoning.length > 0 ? { reasoning_content: reasoning } : {},
 ```
 
-即 reasoning **只在 tool-call 轮被 provider 要求回传**,其他轮被忽略。所以 §1.1 表里 reasoning 占 57.6% 的那类会话,其成本主要来自**每一轮都携带它的字节量**(编码、传输、缓存),而不是 provider 的实际计费。这降低了 L2 缺失的代价,但不消除它 —— 这也是为什么本方案把收益重心完全放在 L1。
+只要那条消息带 reasoning,它就**每一轮都进入请求体**。注释里"ignores it elsewhere"讲的是 **provider 侧的计费行为**(官方规则不要求非 tool-call 轮回传),不是"模型看不到"。两者的区别决定了完全不同的结论:
 
-**对 `keep:` 契约的影响:** 契约放 reasoning 仍然正确,理由从"反正会被剥掉"变成"provider 本就忽略它,所以它天然是一次性的控制信号"。放 text 反而更差 —— text 一定会被回传。
+- 按"计费"视角 → reasoning 是编码/传输开销 → 优先级低;
+- 按"模型看到什么"视角 → **reasoning 每一轮都在上下文里** → 它是内耗自我强化的直接机制(§8.6)。
+
+本插件的目标不是省钱,是**让模型不被自己的旧内耗带偏**,所以正确的视角是后者。
 
 ### 8.6 仍然成立的做法
 
+**不碰 `llm/stream`,也不碰日志 —— 在投影层剥除。**
+
+`Session.deriveMessages()` 是消息列表的**唯一来源**:请求在 `agent-loop` 里由它构建,运行时不变式也拿它比对(`invariant.ts:26`:请求必须逐字等于 `session.deriveMessages()`)。于是:
+
+> 包装这一个方法,两侧就同时改变。不变式不是被绕过,而是被**满足** —— 它比对的正是我们返回的那个值。
+
+这与 §8.1 的约束不冲突,反而正是它要求的:只要"请求 == 投影"成立,内容是什么由投影决定。
+
+**为什么不去覆盖 `deriveEventMessage`。** 那个纯函数被 11 个子系统共用,含 `dsh-token-meter`(计费)与每个请求重建路径,它们必须继续看到**日志里真实存在的东西**。改它会让计费和重建失真。包装实例自己的投影只改变"发出去什么"。
+
+**为什么不是 `replace`。** §3.1 的禁令在此处收紧成死锁:replace 必须列出被遮蔽的节点,那份列表只能经 `sourceEventSeqs` 传递,而 surface-eligible 的 `assistant/message` 一旦带该字段就被 `assertProvenance` 直接拒收。两个规则互相封死,**没有空子**(`raw !== void 0` 判的是字段存在,空数组也抛)。
+
+**代价与前提。**
+
+1. **日志永久保留 reasoning**,`history_read` 仍可取回 —— 剥除是可逆的;
+2. 因此**必须先让结论有别的落点**。实测:中途步骤的正文是 0–56 字节,结论全沉在数 KB 的 reasoning 里。直接剥掉 = 模型下轮不知道自己干了什么。所以 §6.4 的"写结论"契约是剥除的**前置条件**,不是配套优化;
+3. 包装**幂等**:标记存在 symbol 上(而非模块作用域),因为会话比插件挂载活得久 —— resume、reload、二次挂载都不能包两层。
+
+**实测效果**(真实会话,143629 字节 reasoning):
+
+```
+剥除前 865 条消息 / 938609 字节
+剥除后 865 条消息 / 787273 字节
+消息数不变(0 条被丢弃,配对关系完好),省 16.1%
+```
 `llm/stream` 作为**只读观测点**仍然可用:可以数 token、记录 reasoning 占比、判断某轮是否遵守了 `keep:` 契约。本插件的 P0 观测口径因此可以搬到运行时,而不只是离线脚本。
 
 ---
@@ -459,6 +515,7 @@ L2 想省的两块,现在只剩一条窄路:
 | **P2 L1 上半** | post-execute 加编号 + 提示词加输出契约,**只观测不删**,评估模型标记质量 | **已完成**:编号存活并持久化(§7.5);契约的指出问题是遵循率(§6.2.1) |
 | **P3 L1 下半** | 打开 replace,先只处理 `exec_command`/`read`;上线 `history_read` | **通道已打通**(§7.5);`history_read` 已上线(§9) |
 | **P5 默认删除** | 翻转默认值:未表态即清空,模型只决定留什么(§6.2.2) | **高**:前置是 `history_read` 可用 + 使用者在环 |
+| **P6 reasoning 剥除** | 结论契约(§6.4)+ 投影层剥除(§8.6) | **已实现**:真实会话省 16.1%,消息数不变;遵循率待观察 |
 | **P4 扩展** | 扩到 apply_patch / 子 agent 结果;决定是否彻底摘掉 `dsh-compaction-basic` | 中 |
 
 **每个阶段同时看两个指标:省了多少 token、任务成功率有没有掉。** 只看 token 会一路滑向"删掉关键信息"的降智结局。
@@ -472,7 +529,8 @@ L2 想省的两块,现在只剩一条窄路:
 1. ~~`tools/post-execute` 位于 `finalizeContent` **之前**;返回 `{kind:'accept', content}` 后的编号是否会被 `finalizeContent` 覆盖。~~ **已验:编号在真实会话里存活并持久化**(见 §7 的验证记录)。
 2. `replaceGeneration` 每次 replace 递增 → 下一个请求被判为"新请求序列" → 提示词协调从 `in-history` 追加退化为归并到节点 0(`dsh-agent-loop/lib/index.js`,`step()` 与 `buildRequest()` 里的 `startsSeries` 判定)。提示词稳定时无害;每轮变化时这个优化就废了。
 3. ~~模型对 `keep:` 契约的实际遵循率(决定 P2 是否值得继续)。~~ **已测:可选语气下,56 条编号结果只有 2 条被回答(3.6%)。契约已改为义务语气并补上 `keep: all`(§6.2.1);新语气下的遵循率待复测,这仍是决定本项目去留的那一问。**
-4. §8.5 判定 reasoning 无解,前提是"日志层不能改 `assistant/message`"(§3.1)。若未来版本给 surface 投影开了扩展点,这一条需要重新评估。
+4. ~~§8.5 判定 reasoning 无解。~~ **已推翻**:§3.1 的禁令比当年读到的更窄 —— 它只禁 `assistant/message` 携带 `sourceEventSeqs`,由此推出的是"`replace` 无法遮蔽 assistant 消息",而不是"reasoning 无法被丢弃"。正确入口是包装 `deriveMessages`(§8.6),**已实现并实测省 16.1%**。
+5. **结论契约(§6.4)的遵循率** —— 决定 reasoning 剥除是否安全。文案是纯提示词,没有协议层强制;若不达标,下一步是用工具承载结论。
 
 ---
 
