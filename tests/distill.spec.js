@@ -100,6 +100,14 @@ describe('keep contract', () => {
     expect(parseIndices('three')).toBeNull()
   })
 
+  it('refuses a copied placeholder, which keeps the result intact', () => {
+    // The contract shows `<line>,<line>,...` precisely so a model cannot echo
+    // a real-looking example back. If one copies it anyway, the strict parser
+    // turns that into "no decision" rather than deleting everything.
+    expect(parseIndices('<line>,<line>,...')).toBeNull()
+    expect(parseIndices('<line>')).toBeNull()
+  })
+
   it('flags a malformed line so the node keeps its original text', () => {
     expect(parseKeep([text('keep: three')])).toEqual({
       found: true, indices: [], malformed: true,
@@ -222,7 +230,13 @@ describe('prompt contract', () => {
   const section = contractSection(20)
 
   it('states the exact line syntax the parser accepts', () => {
-    expect(section).toContain('keep: 3,7,12')
+    expect(section).toContain('keep: <line>,<line>,...')
+  })
+
+  it('does not offer a copyable example that could be mistaken for a decision', () => {
+    // A concrete sample like `3,7,12` gets echoed back verbatim, which reads
+    // as a real judgement and deletes lines the model never chose.
+    expect(section).not.toMatch(/keep:\s*\d/)
   })
 
   it('names the threshold the plugin numbers at', () => {

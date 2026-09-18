@@ -323,7 +323,7 @@ describe('mounting', () => {
     apply(ctx, {})
     expect(sections).toHaveLength(1)
     expect(sections[0].name).toBe(PROMPT_SECTION)
-    expect(sections[0].text()).toContain('keep: 3,7,12')
+    expect(sections[0].text()).toContain('keep: <line>,<line>,...')
   })
 
   it('asks for no prompt text once numbering is off', () => {
@@ -366,7 +366,7 @@ describe('mounting', () => {
       async () => ({ kind: 'accept' }),
     )
     expect(decision.content[0].text.startsWith('[1] row 1')).toBe(true)
-    expect(decision.content[1].text).toContain('keep: 3,7,12')
+    expect(decision.content[1].text).toContain('keep: <line>,<line>,...')
   })
 
   it('leaves a short result untouched', async () => {
