@@ -34,6 +34,7 @@ import {
   parseKeep,
   shouldNumber,
   splitLines,
+  stripNumbering,
   textLeaves,
 } from './distill.js'
 
@@ -51,6 +52,14 @@ export const SETTINGS_NAMESPACE = 'stepwise-distill'
  * The service ships in the base bundle, so every profile has it.
  */
 export const inject = ['systemPrompt']
+
+/**
+ * Services read when the running profile provides them.
+ *
+ * Only the prompt service is required; the command is registered through
+ * `ctx.commands` when a profile offers one, so a headless run still loads.
+ */
+export const optionalInject = ['commands']
 
 /** Default line threshold above which a tool result is numbered. */
 export const DEFAULT_MIN_LINES = 20
@@ -281,7 +290,10 @@ export function planDistillation(event, events, config) {
     totalLines: lines.length,
     keptLines: lines,
     keptIndices: inRange,
-    originalText: target.text,
+    // Report the size the model actually saw. A numbered result carries a
+    // counter on every line, so measuring the numbered text would overstate
+    // both the original and the saving.
+    originalText: stripNumbering(target.text),
     seq: event.seq,
   })
 
@@ -292,7 +304,7 @@ export function planDistillation(event, events, config) {
     seq: event.seq,
     outer: target.outer,
     index: target.index,
-    originalBytes: target.text.length,
+    originalBytes: stripNumbering(target.text).length,
     replacement,
     keptIndices: inRange,
     totalLines: lines.length,
@@ -304,6 +316,83 @@ export function planDistillation(event, events, config) {
  * @param ctx - plugin context.
  * @param config - raw plugin config from the loader.
  */
+/**
+ * Summarize what distillation has done to one event log.
+ *
+ * Pure over the log so it can answer for a live session and for an archived
+ * file alike, which is what makes the same numbers available to the command,
+ * to the offline audit script, and to any future UI.
+ *
+ * @param events - the session's events in log order.
+ * @returns counts, byte savings, and the kept share of each distilled node.
+ */
+export function summarize(events) {
+  const total = { numbered: 0, distilled: 0, originalBytes: 0, distilledBytes: 0 }
+  const keptShares = []
+  const problems = []
+  const seen = new Set()
+
+  for (const event of events) {
+    if (event?.type !== 'tool/result') continue
+    for (const leaf of textLeaves(event.data?.message)) {
+      if (isNumbered(leaf.text) && !isDistilled(leaf.text)) total.numbered += 1
+      const marker = distillMarker(leaf.text)
+      if (marker === undefined) continue
+      if (seen.has(event.seq)) continue
+      seen.add(event.seq)
+
+      total.distilled += 1
+      total.distilledBytes += leaf.text.length
+      if (!leaf.text.includes('history_read')) {
+        problems.push(`seq ${event.seq}: no retrieval handle`)
+      }
+      const size = /original (\d+) bytes/.exec(leaf.text)
+      if (size !== null) total.originalBytes += Number(size[1])
+      const share = /^(\d+)\/(\d+) lines/.exec(marker)
+      if (share !== null && Number(share[2]) > 0) {
+        keptShares.push(Number(share[1]) / Number(share[2]))
+      }
+    }
+  }
+
+  return {
+    ...total,
+    savedBytes: Math.max(0, total.originalBytes - total.distilledBytes),
+    keptShares,
+    problems,
+  }
+}
+
+/**
+ * Render the summary as the text a `/distill` invocation shows.
+ * @param summary - the value returned by {@link summarize}.
+ * @param config - resolved plugin config.
+ * @returns human-readable lines.
+ */
+export function renderSummary(summary, config) {
+  const lines = [
+    `mode: ${config.mode}${config.mode === 'observe' ? ' (nothing is rewritten)' : ''}`,
+    `numbered results awaiting a keep: line: ${summary.numbered}`,
+    `distilled results: ${summary.distilled}`,
+  ]
+  if (summary.distilled > 0) {
+    const share = summary.keptShares.length === 0
+      ? 0
+      : summary.keptShares.reduce((sum, value) => sum + value, 0) / summary.keptShares.length
+    lines.push(`bytes removed: ${summary.savedBytes} of ${summary.originalBytes}`)
+    lines.push(`kept share of lines: mean ${(share * 100).toFixed(1)}%`)
+  }
+  if (summary.problems.length > 0) {
+    lines.push('PROBLEMS:')
+    for (const problem of summary.problems) lines.push(`  ${problem}`)
+  }
+  if (config.mode === 'distill' && summary.numbered > 0 && summary.distilled === 0) {
+    lines.push('')
+    lines.push('A numbered result is distilled only after you answer it with a keep: line.')
+  }
+  return lines.join('\n')
+}
+
 export function apply(ctx, config) {
   const resolved = resolveConfig(config)
   ctx.logger?.info?.(`[${name}] loaded: mode=${resolved.mode} `
@@ -364,6 +453,35 @@ export function apply(ctx, config) {
    * must see the numbers while it still has the content in view -- that is what
    * its `keep:` line refers to.
    */
+  /**
+   * Expose what distillation is doing, on demand, inside the running session.
+   *
+   * The same numbers the offline audit reports, computed from the live log, so
+   * an operator can tell "nothing qualifies yet" apart from "the model is not
+   * answering" without leaving the conversation.
+   */
+  const registerCommand = (commands) => {
+    commands.register({
+      name: 'distill',
+      description: 'Show what stepwise distillation has done to this session',
+      handler: (invocation) => {
+        const current = resolveConfig(config)
+        const summary = summarize(readEvents(invocation?.agent?.session))
+        return { kind: 'success', text: renderSummary(summary, current) }
+      },
+    })
+  }
+  if (typeof ctx.inject === 'function') {
+    ctx.inject(optionalInject, (injected) => {
+      if (injected?.commands === undefined) return
+      try {
+        registerCommand(injected.commands)
+      } catch (error) {
+        ctx.logger?.warn?.(`[${name}] /distill not registered: ${String(error)}`)
+      }
+    })
+  }
+
   listen('tools/post-execute', async (exec, result, next) => {
     const decision = await next()
     const current = resolveConfig(config)

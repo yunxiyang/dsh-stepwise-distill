@@ -22,6 +22,38 @@ export declare const PROMPT_SECTION: 'stepwise-distill:contract'
 /** Sort order placing the contract after the harness-source and web-surface notes. */
 export declare const PROMPT_SECTION_ORDER: 10250
 
+/** Services read when the running profile provides them. */
+export declare const optionalInject: ['commands']
+
+/** Tools whose output already carries authoritative line numbers. */
+export declare const SELF_NUMBERED_TOOLS: string[]
+
+/** Placeholder for a result whose tool/call is missing from the log. */
+export declare const UNKNOWN_TOOL: '<unknown>'
+
+/** Totals one session's numbering and distillation. */
+export interface DistillSummary {
+  numbered: number
+  distilled: number
+  originalBytes: number
+  distilledBytes: number
+  savedBytes: number
+  keptShares: number[]
+  problems: string[]
+}
+
+/** Summarize what distillation has done to one event log. */
+export declare function summarize(events: readonly unknown[]): DistillSummary
+
+/** Render the summary as `/distill` output. */
+export declare function renderSummary(summary: DistillSummary, config: ResolvedConfig): string
+
+/** Resolve the callId pairing one result with its call. */
+export declare function resultCallId(event: unknown): string | undefined
+
+/** Whether a tool's results are outside this plugin's scope. */
+export declare function shouldSkip(toolName: unknown, config: ResolvedConfig): boolean
+
 /** Distillation policy; every field has a default, so all are optional. */
 export interface Config {
   /** `observe` numbers and reports; `distill` also rewrites the surface. */
@@ -91,8 +123,8 @@ export declare function isEligible(
   events: readonly unknown[],
 ): boolean
 
-/** Find the assistant message that answered one tool result. */
-export declare function findKeepSource(events: readonly unknown[], seq: number): unknown[] | null
+/** Collect the blocks of every assistant message between a result and the next human turn. */
+export declare function findKeepSource(events: readonly unknown[], seq: number): unknown[]
 
 /** Plan the distillation of one result event; pure and deterministic. */
 export declare function planDistillation(

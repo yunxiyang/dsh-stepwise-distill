@@ -11,6 +11,7 @@ import {
   shouldNumber,
   splitLines,
   stripNumberPrefix,
+  stripNumbering,
   textLeaves,
 } from '../src/distill.js'
 
@@ -53,6 +54,12 @@ describe('line numbering', () => {
   it('does not mistake content that merely starts with a bracket', () => {
     expect(isNumbered('[note] first\nplain second\nplain third')).toBe(false)
     expect(isNumbered('[1] only one line')).toBe(false)
+  })
+
+  it('strips a whole numbering pass, and only when one is present', () => {
+    const raw = 'alpha\nbeta\ngamma'
+    expect(stripNumbering(numberLines(raw))).toBe(raw)
+    expect(stripNumbering(raw)).toBe(raw)
   })
 })
 

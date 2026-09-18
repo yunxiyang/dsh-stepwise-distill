@@ -22,6 +22,15 @@ export declare function numberLines(text: unknown): string
 /** Whether a result is long enough to be worth numbering. */
 export declare function shouldNumber(text: unknown, minLines: number): boolean
 
+/** Whether a result is long enough to be worth distilling, numbered or not. */
+export declare function isLongEnough(text: unknown, minLines: number): boolean
+
+/** Whether a result already carries this plugin's numbering. */
+export declare function isNumbered(text: unknown): boolean
+
+/** Remove one numbering pass from a whole result, for measurement. */
+export declare function stripNumbering(text: unknown): string
+
 /** Flatten a message's text blocks to plain text. */
 export declare function textOf(blocks: unknown): string
 

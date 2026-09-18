@@ -9,6 +9,7 @@ import {
   readEvents,
   resultCallId,
   resolveConfig,
+  summarize,
   toolNameOf,
 } from '../src/index.js'
 import { contractSection, numberLines, parseKeep } from '../src/distill.js'
@@ -271,6 +272,7 @@ describe('mounting', () => {
     const ctx = {
       on: (event, handler) => handlers.set(event, handler),
       systemPrompt: { section: value => sections.push(value) },
+      inject: (services, callback) => callback({}),
       logger: { info: vi.fn(), warn: vi.fn() },
     }
     apply(ctx, config)
@@ -491,5 +493,81 @@ describe('mounting', () => {
       { kind: 'reject' })
     expect(decision).toEqual({ kind: 'reject' })
     expect(session.append).toBeUndefined()
+  })
+
+  it('registers a /distill command when the profile offers one', () => {
+    const registered = []
+    const ctx = {
+      on: () => {},
+      systemPrompt: { section: () => {} },
+      inject: (services, callback) => callback({
+        commands: { register: definition => registered.push(definition) },
+      }),
+      logger: { info: vi.fn(), warn: vi.fn() },
+    }
+    apply(ctx, {})
+    expect(registered).toHaveLength(1)
+    expect(registered[0].name).toBe('distill')
+  })
+
+  it('reports the live session state through the command', () => {
+    const registered = []
+    const events = log({ keep: '3' })
+    const ctx = {
+      on: () => {},
+      systemPrompt: { section: () => {} },
+      inject: (services, callback) => callback({
+        commands: { register: definition => registered.push(definition) },
+      }),
+      logger: { info: vi.fn(), warn: vi.fn() },
+    }
+    apply(ctx, { mode: 'observe' })
+    const result = registered[0].handler({ agent: { session: { snapshotEvents: () => events } } })
+    expect(result.kind).toBe('success')
+    expect(result.text).toContain('mode: observe')
+  })
+
+  it('mounts without a commands service', () => {
+    const handlers = new Map()
+    const ctx = {
+      on: (event, handler) => handlers.set(event, handler),
+      systemPrompt: { section: () => {} },
+      logger: {},
+    }
+    expect(() => apply(ctx, {})).not.toThrow()
+    expect(handlers.has('tools/post-execute')).toBe(true)
+  })
+})
+
+describe('summarize', () => {
+  it('counts numbered and distilled results separately', () => {
+    const events = log({ result: numberLines(LONG), keep: '3' })
+    const summary = summarize(events)
+    expect(summary.numbered).toBe(1)
+    expect(summary.distilled).toBe(0)
+  })
+
+  it('reads savings and kept share out of a distilled node', () => {
+    const distilled = [
+      '[exec_command] ok, 40 lines -> kept 2: 3: row 3; 7: row 7',
+      'distilled: 2/40 lines, 38 dropped, original 900 bytes',
+      'full: session seq 2 (history_read)',
+    ].join('\n')
+    const summary = summarize(log({ result: distilled, keep: '3' }))
+    expect(summary.distilled).toBe(1)
+    expect(summary.originalBytes).toBe(900)
+    expect(summary.keptShares).toEqual([2 / 40])
+  })
+
+  it('flags a distilled node that lost its retrieval handle', () => {
+    const orphaned = 'distilled: 2/40 lines, 38 dropped, original 900 bytes'
+    const summary = summarize(log({ result: orphaned, keep: '3' }))
+    expect(summary.problems).toEqual(['seq 2: no retrieval handle'])
+  })
+
+  it('is empty for a log with no results', () => {
+    const summary = summarize([{ seq: 0, type: 'step/start', data: { turn: 1, step: 1 } }])
+    expect(summary.distilled).toBe(0)
+    expect(summary.numbered).toBe(0)
   })
 })
