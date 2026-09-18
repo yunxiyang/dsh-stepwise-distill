@@ -176,9 +176,10 @@ describe('keep source', () => {
     expect(findKeepSource(log({ answered: false }), 2)).toEqual([])
   })
 
-  it('keeps scanning past an assistant message that said nothing about keeping', () => {
-    // The real shape: read a result, act on it, and only then name the lines
-    // worth keeping. Stopping at the first reply would lose that decision.
+  it('answers only from the next assistant message', () => {
+    // One decision answers one result. A keep: line written much later belongs
+    // to whatever step produced it, not to every result before it -- reading
+    // it as agreement with all of them silently distils unjudged output.
     const events = log({ keep: '3' })
     events.splice(3, 0, {
       seq: 3,
@@ -186,9 +187,36 @@ describe('keep source', () => {
       data: { turn: 1, step: 2, message: { role: 'assistant', content: [text('reading it now')] } },
     })
     events[4].seq = 4
-    const blocks = findKeepSource(events, 2)
-    expect(blocks).toEqual([text('reading it now'), reasoning('plan\nkeep: 3')])
-    expect(parseKeep(blocks).indices).toEqual([3])
+    expect(findKeepSource(events, 2)).toEqual([text('reading it now')])
+    expect(parseKeep(findKeepSource(events, 2)).found).toBe(false)
+  })
+
+  it('does not let a late keep: line claim an earlier result', () => {
+    // The shape that produced the bug: steps 2..N each yield a result, and a
+    // single keep: line appears at the very end of the turn.
+    const events = log({ keep: '3' })
+    events.pop()
+    events.push({
+      seq: 3,
+      type: 'assistant/message',
+      data: { turn: 1, step: 2, message: { role: 'assistant', content: [text('done with that')] } },
+    })
+    events.push({
+      seq: 4,
+      type: 'tool/result',
+      data: {
+        turn: 1,
+        step: 3,
+        source: { kind: 'tool', callId: 'c2' },
+        message: { content: [{ type: 'tool-result', toolCallId: 'c2', content: [text(LONG)] }] },
+      },
+    })
+    events.push({
+      seq: 5,
+      type: 'assistant/message',
+      data: { turn: 1, step: 3, message: { role: 'assistant', content: [reasoning('keep: 3,7,12')] } },
+    })
+    expect(planDistillation(events[2], events, CONFIG).skip).toBe('no-keep-line')
   })
 })
 
