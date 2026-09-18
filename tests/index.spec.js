@@ -7,6 +7,7 @@ import {
   isEligible,
   planDistillation,
   readEvents,
+  resultCallId,
   resolveConfig,
   toolNameOf,
 } from '../src/index.js'
@@ -101,6 +102,24 @@ describe('tool name resolution', () => {
     expect(toolNameOf(events[2], events)).toBe('exec_command')
   })
 
+  it('reads the callId from the message block when the event omits it', () => {
+    // Real logs differ: some results carry data.source.callId, others only
+    // expose the pairing on the tool-result block itself.
+    const events = log()
+    delete events[2].data.source
+    expect(toolNameOf(events[2], events)).toBe('exec_command')
+  })
+
+  it('prefers the event-level callId when both are present', () => {
+    const events = log()
+    events[2].data.message.content[0].toolCallId = 'stale'
+    expect(toolNameOf(events[2], events)).toBe('exec_command')
+  })
+
+  it('reports no callId for a non-result event', () => {
+    expect(resultCallId({ type: 'step/start', data: {} })).toBeUndefined()
+  })
+
   it('reports an unknown name instead of guessing', () => {
     expect(toolNameOf({ data: { source: { callId: 'nope' } } }, log())).toBe('<unknown>')
   })
@@ -120,6 +139,19 @@ describe('eligibility', () => {
     const events = log({ tool: 'read' })
     const config = resolveConfig({ tools: ['exec_command'] })
     expect(isEligible(events[2], config, events)).toBe(false)
+  })
+
+  it('excludes a self-numbered tool by default', () => {
+    const events = log({ tool: 'read' })
+    expect(isEligible(events[2], CONFIG, events)).toBe(false)
+  })
+
+  it('excludes an unknown tool rather than guessing', () => {
+    // A result whose tool/call is absent from the log: nothing says how its
+    // output is shaped, so it is left alone.
+    const events = log().filter(event => event.type !== 'tool/call')
+    const result = events.find(event => event.type === 'tool/result')
+    expect(isEligible(result, CONFIG, events)).toBe(false)
   })
 
   it('ignores events that are not tool results', () => {
@@ -270,8 +302,8 @@ describe('mounting', () => {
     const { handlers } = mount({})
     const decision = await handlers.get('tools/post-execute')(
       { name: 'exec_command' },
-      {},
-      async () => ({ kind: 'accept', content: [text(LONG)] }),
+      { content: [text(LONG)] },
+      async () => ({ kind: 'accept' }),
     )
     expect(decision.content[0].text.startsWith('[1] row 1')).toBe(true)
     expect(decision.content[1].text).toContain('keep: 3,7,12')
@@ -279,13 +311,69 @@ describe('mounting', () => {
 
   it('leaves a short result untouched', async () => {
     const { handlers } = mount({})
-    const original = { kind: 'accept', content: [text('a\nb')] }
+    const original = { kind: 'accept' }
     const decision = await handlers.get('tools/post-execute')(
       { name: 'exec_command' },
-      {},
+      { content: [text('a\nb')] },
       async () => original,
     )
     expect(decision).toBe(original)
+  })
+
+  it('never re-numbers a tool that numbers its own output', async () => {
+    // `read` renders real file line numbers inside its envelope; a second
+    // numbering would put [2] and 2: side by side with different meanings.
+    const { handlers } = mount({})
+    const original = { kind: 'accept' }
+    const decision = await handlers.get('tools/post-execute')(
+      { name: 'read' },
+      { content: [text(LONG)] },
+      async () => original,
+    )
+    expect(decision).toBe(original)
+  })
+
+  it('honours the tools allowlist when numbering', async () => {
+    const { handlers } = mount({ tools: ['exec_command'] })
+    const original = { kind: 'accept' }
+    const decision = await handlers.get('tools/post-execute')(
+      { name: 'bash' },
+      { content: [text(LONG)] },
+      async () => original,
+    )
+    expect(decision).toBe(original)
+  })
+
+  it('skips a result whose tool name is unknown', async () => {
+    const { handlers } = mount({})
+    const original = { kind: 'accept' }
+    const decision = await handlers.get('tools/post-execute')(
+      {}, { content: [text(LONG)] }, async () => original,
+    )
+    expect(decision).toBe(original)
+  })
+
+  it('numbers the content with no direct decision content', async () => {
+    // The real pipeline returns a bare accept; the text lives on the result.
+    const { handlers } = mount({})
+    const decision = await handlers.get('tools/post-execute')(
+      { name: 'bash' },
+      { content: [text(LONG)] },
+      async () => ({ kind: 'accept' }),
+    )
+    expect(decision.kind).toBe('accept')
+    expect(decision.content[0].text.startsWith('[1] row 1')).toBe(true)
+  })
+
+  it('passes a block decision through untouched', async () => {
+    const { handlers } = mount({})
+    const blocked = { kind: 'block', feedback: [text('nope')] }
+    const decision = await handlers.get('tools/post-execute')(
+      { name: 'bash' },
+      { content: [text(LONG)] },
+      async () => blocked,
+    )
+    expect(decision).toBe(blocked)
   })
 
   it('never distils during the first step, when no turn has completed', async () => {

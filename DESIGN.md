@@ -147,7 +147,7 @@ session.append('tool/result', { turn, step, message: 新消息 }, {
 
 ### 6.1 工具结果编号(在 post-execute 里做)
 
-只对超过阈值的文本结果编号(建议 20 行):
+只对超过阈值的文本结果编号(建议 20 行),**且只对尚无编号的结果编号**:
 
 ```
 [1] total 24
@@ -156,6 +156,33 @@ session.append('tool/result', { turn, step, message: 新消息 }, {
 ```
 
 **成本提醒**:每行编号约 3–5 token,而它进日志后每轮重发。40 行的结果就是约 200 token/轮。短结果不编号、直接放过。
+
+#### 6.1.1 `read` 已有官方编号,必须排除
+
+实测确认(`packages/fs/tool-fs/src/read-render.ts:150-170`):`read` 工具的**唯一**输出出口 `formatReadOutput` 无条件给每一行加编号,没有开关:
+
+```
+<path>/tmp/big.conf</path>
+<type>file</type>
+<content>
+1: config_key_1 = value_1
+2: config_key_2 = value_2
+...
+60: config_key_60 = value_60
+
+(End of file - total 60 lines)
+</content>
+```
+
+而且它的编号设计得比本方案更强:
+
+- 编号是**文件真实行号**(`line.number`),不是数组下标;
+- 分页读取用 `offset=` 续读,编号**跨页连续**;
+- footer 说明窗口范围(`Showing lines 41-80 of 200`),并给出续读的 `offset`。
+
+**再包一层编号是错的。** 模型会同时看到 `[2]` 与 `2:`,无法判断 `keep:` 里该写哪个;而两套编号的语义本就不同(一个是结果内下标,一个是文件行号)。**`read` 一律排除在编号之外**,它的行号直接作为 `keep:` 的取值。
+
+适用编号的是**输出无结构**的工具(`exec_command`/`bash` 等)——它们的输出来自命令,行号只能由本插件给出。
 
 ### 6.2 模型输出契约
 
