@@ -408,11 +408,15 @@ describe('mounting', () => {
     expect(decision).toBe(blocked)
   })
 
-  it('never distils during the first step, when no turn has completed', async () => {
+  it('distils on the very first step once a keep: line exists', async () => {
+    // Distillation is gated by the model's decision, not by turn or step
+    // boundaries: a result answered with a keep: line is settled, whatever
+    // turn it came from.
     const { handlers } = mount({ mode: 'distill' })
-    const session = { snapshotEvents: () => log({ keep: '3' }) }
+    const append = vi.fn()
+    const session = { snapshotEvents: () => log({ keep: '3' }), append }
     await step(handlers, { agent: { session }, turn: 1, step: 1 })
-    expect(session.append).toBeUndefined()
+    expect(append).toHaveBeenCalledTimes(1)
   })
 
   it('logs but does not mutate in observe mode', async () => {
@@ -435,16 +439,22 @@ describe('mounting', () => {
     expect(type).toBe('tool/result')
     expect(meta.surfaceOp).toEqual({ op: 'replace', startSeq: 2, endSeq: 2 })
     expect(meta.sourceEventSeqs).toEqual([2])
+    // The rewrite must describe the node it replaces; the harness compares
+    // turn and step against the original and rejects any difference.
+    expect(payload.turn).toBe(1)
+    expect(payload.step).toBe(1)
     // Structure must survive: the pairing id and error flag are not ours to change.
     expect(payload.message.content[0].toolCallId).toBe('c1')
     expect(payload.message.content[0].isError).toBe(false)
     expect(payload.message.content[0].content[0].text).toContain('distilled:')
   })
 
-  it('skips results belonging to the turn that is still running', async () => {
+  it('leaves a result alone until the model has answered it', async () => {
+    // The only gate is the keep: line. A result still being worked on has no
+    // assistant message after it, so there is nothing to act on yet.
     const { handlers } = mount({ mode: 'distill' })
     const events = log({ keep: '3' })
-    events[2].data.turn = 5
+    events.pop()
     const append = vi.fn()
     await step(handlers, {
       agent: { session: { snapshotEvents: () => events, append } },
