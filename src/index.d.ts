@@ -16,6 +16,12 @@ export declare const DEFAULT_MIN_LINES: 20
 /** Default operating mode: measure before mutating. */
 export declare const DEFAULT_MODE: 'observe'
 
+/** Prompt section name carrying the keep-contract instructions. */
+export declare const PROMPT_SECTION: 'stepwise-distill:contract'
+
+/** Sort order placing the contract after the harness-source and web-surface notes. */
+export declare const PROMPT_SECTION_ORDER: 10250
+
 /** Distillation policy; every field has a default, so all are optional. */
 export interface Config {
   /** `observe` numbers and reports; `distill` also rewrites the surface. */

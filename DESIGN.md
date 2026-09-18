@@ -248,7 +248,20 @@ L2 想省的两块,现在只剩一条窄路:
 - **reasoning**:占回传量 10.6%(实测 119 个会话,单会话最高 35.7%)。要在日志层去掉,得改 `assistant/message`,而这被 §3.1 禁止 —— **无解,放弃**。
 - **`keep:` 行**:它进的是 `assistant/message` 的 text 块,同一禁令。**因此契约必须落在 reasoning 块里**,让它在模型自己下一轮被 provider 侧自然丢弃,而不是靠我们事后清洗。
 
-**代价:** reasoning 会继续按原样回传。这是方案的可接受损失 —— 收益主体是工具结果(50.0%),那部分走 L1,不受影响。
+**代价与补偿:** reasoning 仍留在日志里并随请求发出,但**官方规则让它在多数轮次不产生实际成本**。`packages/llm/llm-deepseek/src/serialize.ts:225-233`:
+
+```js
+// CoT passback on every reasoning-carrying turn. The official rule
+// (guides/thinking_mode.mdx) requires it on tool-call turns and ignores it
+// elsewhere; a gateway re-encoding the conversation for another vendor
+// recovers that turn's upstream thinking signature by hashing this exact
+// text, which a tool-call-free turn carries nowhere else.
+...reasoning.length > 0 ? { reasoning_content: reasoning } : {},
+```
+
+即 reasoning **只在 tool-call 轮被 provider 要求回传**,其他轮被忽略。所以 §1.1 表里 reasoning 占 57.6% 的那类会话,其成本主要来自**每一轮都携带它的字节量**(编码、传输、缓存),而不是 provider 的实际计费。这降低了 L2 缺失的代价,但不消除它 —— 这也是为什么本方案把收益重心完全放在 L1。
+
+**对 `keep:` 契约的影响:** 契约放 reasoning 仍然正确,理由从"反正会被剥掉"变成"provider 本就忽略它,所以它天然是一次性的控制信号"。放 text 反而更差 —— text 一定会被回传。
 
 ### 8.6 仍然成立的做法
 

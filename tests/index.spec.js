@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
   apply,
+  PROMPT_SECTION,
   findKeepSource,
   isEligible,
   planDistillation,
@@ -8,6 +9,7 @@ import {
   resolveConfig,
   toolNameOf,
 } from '../src/index.js'
+import { contractSection } from '../src/distill.js'
 
 const text = value => ({ type: 'text', text: value })
 const reasoning = value => ({ type: 'reasoning', text: value })
@@ -191,17 +193,77 @@ describe('mounting', () => {
   /** Capture the handlers a Cordis context receives. */
   function mount(config) {
     const handlers = new Map()
+    const sections = []
     const ctx = {
       on: (event, handler) => handlers.set(event, handler),
+      systemPrompt: { section: value => sections.push(value) },
       logger: { info: vi.fn(), warn: vi.fn() },
     }
     apply(ctx, config)
-    return { handlers, ctx }
+    return { handlers, ctx, sections }
   }
 
   it('registers both hooks', () => {
     const { handlers } = mount({})
     expect(handlers.has('tools/post-execute')).toBe(true)
+    expect(handlers.has('agent/pre-step')).toBe(true)
+  })
+
+  it('registers the prompt contract so the syntax is discoverable', () => {
+    const sections = []
+    const ctx = {
+      on: () => {},
+      systemPrompt: { section: value => sections.push(value) },
+      logger: { info: vi.fn(), warn: vi.fn() },
+    }
+    apply(ctx, {})
+    expect(sections).toHaveLength(1)
+    expect(sections[0].name).toBe(PROMPT_SECTION)
+    expect(sections[0].text()).toContain('keep: 3,7,12')
+  })
+
+  it('asks for no prompt text once numbering is off', () => {
+    const sections = []
+    const ctx = {
+      on: () => {},
+      systemPrompt: { section: value => sections.push(value) },
+      logger: { info: vi.fn(), warn: vi.fn() },
+    }
+    apply(ctx, { minLines: 0 })
+    expect(sections[0].text()).toBe('')
+  })
+
+  it('registers the contract through inject when no prompt service is mounted', () => {
+    const sections = []
+    const injectors = []
+    const ctx = {
+      on: () => {},
+      inject: (services, callback) => injectors.push({ services, callback }),
+      logger: { info: vi.fn(), warn: vi.fn() },
+    }
+    apply(ctx, {})
+    expect(injectors).toHaveLength(1)
+    expect(injectors[0].services).toEqual(['systemPrompt'])
+    injectors[0].callback({ systemPrompt: { section: value => sections.push(value) } })
+    expect(sections[0].name).toBe(PROMPT_SECTION)
+  })
+
+  it('survives a prompt service that rejects the section', () => {
+    const ctx = {
+      on: () => {},
+      inject: (services, callback) => callback({
+        systemPrompt: { section: () => { throw new Error('duplicate section name') } },
+      }),
+      logger: { info: vi.fn(), warn: vi.fn() },
+    }
+    expect(() => apply(ctx, {})).not.toThrow()
+    expect(ctx.logger.warn.mock.calls.flat().join('\n')).toContain('duplicate section')
+  })
+
+  it('mounts without any prompt service at all', () => {
+    const handlers = new Map()
+    const ctx = { on: (event, handler) => handlers.set(event, handler), logger: {} }
+    expect(() => apply(ctx, {})).not.toThrow()
     expect(handlers.has('agent/pre-step')).toBe(true)
   })
 

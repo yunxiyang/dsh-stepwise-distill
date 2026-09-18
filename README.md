@@ -51,9 +51,15 @@ ends its reply with one line:
 keep: 3,7,12
 ```
 
-Reasoning is the preferred place for that line, because reasoning is stripped
-from later requests anyway. A reply with no `keep:` line keeps the result
-verbatim.
+Reasoning is the preferred place for that line: the DeepSeek adapter passes
+`reasoning_content` back only on tool-call turns and the API ignores it
+elsewhere, so a control signal there is naturally one-shot. A reply with no
+`keep:` line keeps the result verbatim.
+
+The syntax is announced in a system-prompt section, which is the only way the
+model can learn it -- numbering alone does not say what to do with it. The
+section contributes no text when numbering is off, so an observing profile pays
+nothing for it.
 
 **Solidify.** Before the next step's request is built, each named result is
 rewritten to its kept lines plus a retrieval handle:
@@ -88,6 +94,20 @@ Every rule below exists because the alternative silently destroys information:
 Distillation only ever touches a `tool/result`'s **content**. The harness
 requires `callId`, `isError`, `turn`, and `step` to match byte-for-byte after
 the content is removed, and the plugin rebuilds nothing else.
+
+## What this cannot do
+
+An earlier design also planned to strip reasoning and `keep:` lines from the
+outgoing request at the transport layer. The harness forbids it, with a runtime
+check rather than a convention: `agent-loop`'s invariant compares every
+loop-built request against `session.deriveMessages()` and throws on any
+divergence, and `llm/stream` documents its request as deep-frozen
+("listeners read it, never rewrite it"). There is no extension point in the
+surface projection either.
+
+Reasoning therefore stays in the log and on the wire. Its cost is bounded by
+adapter behaviour rather than by this plugin, which is why the design puts its
+entire return on tool results. See `DESIGN.md` section 8 for the evidence.
 
 ## Install
 

@@ -1,6 +1,6 @@
 {
   "name": "dsh-stepwise-distill",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Solidify DSH session history step by step: rewrite tool results in place to the facts the model actually kept, so long conversations stop re-sending noise every turn.",
   "keywords": [
     "dsh",
@@ -26,9 +26,11 @@
   "types": "lib/index.d.ts",
   "exports": {
     ".": {
+      "types": "./lib/index.d.ts",
       "default": "./lib/index.js"
     },
     "./distill": {
+      "types": "./lib/distill.d.ts",
       "default": "./lib/distill.js"
     },
     "./package.json": "./package.json"
@@ -37,6 +39,7 @@
     "lib/index.js",
     "lib/index.d.ts",
     "lib/distill.js",
+    "lib/distill.d.ts",
     "cordis.patch.yml",
     "CHANGELOG.md",
     "README.md",

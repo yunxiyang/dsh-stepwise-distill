@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.2.0
+
+- Announce the `keep:` contract in a system-prompt section. Numbering alone
+  does not tell the model what to do with it, so without this the plugin could
+  never distill anything. The section contributes no text while numbering is
+  off, and registers through `ctx.systemPrompt.section` when available, through
+  `inject` otherwise, and degrades to hooks-only when no prompt service exists.
+- Record in `DESIGN.md` that the transport-layer plan (L2) is falsified: the
+  harness compares every loop-built request against `session.deriveMessages()`
+  and throws on divergence. Reasoning stays on the wire, so the return rests
+  entirely on tool results.
+- Number the system-prompt contract as the last piece of operating guidance,
+  after the harness-source and web-surface notes.
+
 ## 0.1.0
 
 Initial skeleton and P0 baseline.

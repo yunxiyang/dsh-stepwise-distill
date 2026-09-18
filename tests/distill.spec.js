@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   DISTILL_MARKER,
   buildDistilledText,
+  contractSection,
   isDistilled,
   numberLines,
   parseIndices,
@@ -158,7 +159,7 @@ describe('distilled text', () => {
   })
 })
 
-describe('marker parsing', () => {
+  describe('marker parsing', () => {
   it('ignores a marker-looking substring quoted mid-line', () => {
     // A raw result may quote the word; treating that as distilled would
     // permanently exempt the node from distillation.
@@ -192,5 +193,31 @@ describe('text leaves', () => {
 
   it('exports its marker for the host to recognize', () => {
     expect(DISTILL_MARKER).toBe('distilled:')
+  })
+})
+
+describe('prompt contract', () => {
+  const section = contractSection(20)
+
+  it('states the exact line syntax the parser accepts', () => {
+    expect(section).toContain('keep: 3,7,12')
+  })
+
+  it('names the threshold the plugin numbers at', () => {
+    expect(section).toContain('longer than 20 lines')
+  })
+
+  it('makes the silent default explicit', () => {
+    // A model that omits the line must know that omission keeps everything;
+    // otherwise it may believe silence means "drop it all".
+    expect(section).toContain('without that line keeps every result of that step verbatim')
+  })
+
+  it('says dropping a line is recoverable, so the choice is not destructive', () => {
+    expect(section).toContain('read the original back on demand')
+  })
+
+  it('is deterministic', () => {
+    expect(contractSection(20)).toBe(section)
   })
 })
