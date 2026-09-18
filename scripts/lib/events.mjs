@@ -116,22 +116,33 @@ export function loadSession(path) {
   const [header, ...events] = flat
   if (header?.type !== 'session') throw new Error(`${path}: first record is not a session header`)
 
-  // Format v0 streams raw provider chunks (`assistant/chunk`, `reasoning-chunks`)
-  // as log records that carry no `seq`, so positions -- not fields -- define
-  // sequence numbers. Where a record does carry `seq` it must agree, since the
-  // surface fold keys replacements by that number.
-  const mismatched = events.findIndex((event, index) => event.seq !== undefined && event.seq !== index)
-  if (mismatched !== -1) {
-    throw new Error(
-      `${path}: record ${mismatched} carries seq ${events[mismatched].seq}; expected ${mismatched}`,
-    )
+  // Format v3 numbers every event row by its position. Format v0 interleaves
+  // compressed replay records (`reasoning-chunks`, `text-chunks`,
+  // `tool-call-chunks`) that carry `seq0` instead of `seq`: they restore native
+  // streaming fidelity and never project a message, so they consume no event
+  // number. Both formats therefore reduce to the same rule -- keep exactly the
+  // rows carrying a `seq`, in log order, and require that numbering to be
+  // strictly increasing and unique.
+  const numbered = events.filter(event => event.seq !== undefined)
+  for (const [index, event] of numbered.entries()) {
+    const seq = event.seq
+    if (!Number.isSafeInteger(seq) || seq < 0) {
+      throw new Error(`${path}: an event carries a non-integer seq ${String(seq)}`)
+    }
+    if (index > 0 && seq <= numbered[index - 1].seq) {
+      throw new Error(
+        `${path}: seq ${seq} does not follow ${numbered[index - 1].seq}`,
+      )
+    }
   }
 
   return {
     header,
-    events: events.map((event, index) => (event.seq === index ? event : { ...event, seq: index })),
+    events: numbered,
+    replayRecords: events.length - numbered.length,
     frameCount: frames.length,
     torn: tornStart !== undefined,
+    format: header.version ?? 0,
   }
 }
 
@@ -187,10 +198,17 @@ export function foldSurface(events) {
     }
     if (typeof op !== 'object') throw new Error(`event ${event.seq}: invalid surfaceOp`)
 
-    const startIdx = nodes.indexOf(op.startSeq)
-    const endIdx = nodes.indexOf(op.endSeq)
+    // Format v0 named the range endpoints `start`/`end`; v3 renamed them to
+    // `startSeq`/`endSeq`. Both mean inclusive surface node sequences.
+    const start = op.startSeq ?? op.start
+    const end = op.endSeq ?? op.end
+    if (start === undefined || end === undefined) {
+      throw new Error(`event ${event.seq}: replace surfaceOp has no range`)
+    }
+    const startIdx = nodes.indexOf(start)
+    const endIdx = nodes.indexOf(end)
     if (startIdx === -1 || endIdx === -1) {
-      throw new Error(`event ${event.seq}: replace range ${op.startSeq}..${op.endSeq} is not on the surface`)
+      throw new Error(`event ${event.seq}: replace range ${start}..${end} is not on the surface`)
     }
     const shadowed = nodes.slice(startIdx, endIdx + 1)
     nodes.splice(startIdx, endIdx - startIdx + 1, event.seq)

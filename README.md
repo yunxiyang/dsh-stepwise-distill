@@ -12,27 +12,31 @@ text stays in the append-only log, so replay and audit remain complete.
 ## The problem it targets
 
 Long sessions re-send almost everything they ever produced. Measuring the local
-session corpus (76 readable sessions, 47.4 MB of model-facing history):
+session corpus (119 of 120 artifacts, 71.0 MB of model-facing history):
 
 | Category | Share of re-sent volume |
 |---|---|
 | tool results | 50.0% |
-| assistant text | 33.1% |
-| reasoning | 8.6% |
-| tool-call arguments | 8.3% |
+| assistant text | 31.6% |
+| reasoning | 10.6% |
+| tool-call arguments | 7.8% |
 
-The cost is accumulation, not explosion. Of 8346 tool results, only 189 exceed
-the shipped pruner's 8192-character threshold, and the median result is 579
+The cost is accumulation, not explosion. Of 11383 tool results, only 303 exceed
+the shipped pruner's 8192-character threshold, and the median result is 548
 bytes. That is why `dsh-compaction-tool-result-pruner` and the spill policy
 leave these sessions alone: nothing is oversized, there is simply a lot of it.
-Reasoning is the other axis, and it varies sharply by session -- 60 of 76
+Reasoning is the other axis, and it varies sharply by session -- 98 of 119
 sessions carry reasoning at all, and in one session it is 35.7% of the total
 while another carries none.
 
-The same measurement sizes the opportunity: 40% of text leaves are long enough
-to number, and they hold 84.4% of all result bytes. On one representative
+The same measurement sizes the opportunity: 39.9% of text leaves are long enough
+to number, and they hold 84.3% of all result bytes. On one representative
 session, keeping 20% of numbered lines would leave 0.12 MB of the 0.45 MB of
 eligible content -- a 72% reduction in result volume.
+
+The one unmeasured artifact is corrupt: its event numbering goes backwards at a
+single append boundary. The reader refuses it rather than reporting numbers it
+cannot trust.
 
 ## How it works
 
