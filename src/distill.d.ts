@@ -10,6 +10,12 @@ export declare const DISTILL_MARKER: 'distilled:'
 /** Prefix of the `keep:` contract line the model emits. */
 export declare const KEEP_PREFIX: 'keep:'
 
+/** Payload that answers a numbered result without distilling it. */
+export declare const KEEP_ALL: 'all'
+
+/** Blank the model is asked to fill in, appended to every numbered result. */
+export declare const KEEP_PLACEHOLDER: '???'
+
 /** First line number assigned to a numbered tool result. */
 export declare const FIRST_LINE_NUMBER: 1
 
@@ -34,7 +40,7 @@ export declare function stripNumbering(text: unknown): string
 /** Flatten a message's text blocks to plain text. */
 export declare function textOf(blocks: unknown): string
 
-/** Whether a block is reasoning the transport layer is expected to strip. */
+/** Whether a block is reasoning, which the adapter only replays on tool-call turns. */
 export declare function isReasoning(block: unknown): boolean
 
 /** Parsed `keep:` contract state for one assistant message. */
@@ -45,6 +51,8 @@ export interface KeepSelection {
   indices: number[]
   /** Whether a line was present but unreadable. */
   malformed: boolean
+  /** Whether the answer keeps the result in full, which distils nothing. */
+  all: boolean
 }
 
 /** Extract the kept line numbers from one assistant message. */
@@ -84,6 +92,9 @@ export declare function contractSection(minLines: number): string
 
 /** Whether a leaf text is worth keeping in the distilled form. */
 export declare function isSubstantive(text: unknown): boolean
+
+/** Render the original text of one tool result, for retrieval by seq. */
+export declare function renderHistoryRead(event: unknown, seq: number): { ok: boolean; text: string }
 
 /** One text leaf inside a tool-result message. */
 export interface TextLeaf {

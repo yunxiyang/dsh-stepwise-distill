@@ -23,7 +23,8 @@ import { join } from 'node:path'
 import { homedir } from 'node:os'
 import { loadSession, deriveEventMessage, foldSurface } from './lib/events.mjs'
 import { byteLength } from './lib/pricing.mjs'
-import { DISTILL_MARKER, distillMarker, textLeaves } from '../src/distill.js'
+import { findKeepSource } from '../src/index.js'
+import { DISTILL_MARKER, distillMarker, parseKeep, textLeaves } from '../src/distill.js'
 
 const LOG_PATTERNS = [/^session\.v(\d+)\.jsonl\.zstd$/, /^session\.jsonl\.zstd$/]
 
@@ -127,10 +128,19 @@ function audit(path) {
 }
 
 /**
- * Explain why a node carries no marker but looks numbered, which is the shape
- * of a plugin that numbers results yet never sees a keep: line.
+ * Measure how often the contract is actually answered.
+ *
+ * The rate is computed through the same path the plugin uses to reach its
+ * decision: the answer to a result is the NEXT assistant message
+ * ({@link findKeepSource}), parsed by the same parser ({@link parseKeep}).
+ * Counting `keep:` lines wherever they appear would credit a reply that merely
+ * discusses this plugin, and counting only reasoning blocks -- as an earlier
+ * version did -- misses an answer written in the reply's text, which is where
+ * most answers have actually been observed. Both mistakes make the number
+ * useless for deciding whether the contract is working.
+ *
  * @param path - artifact path.
- * @returns counts of numbered and answered results.
+ * @returns node-level counts of numbering and answers.
  */
 function cooperation(path) {
   const { events } = loadSession(path)
@@ -138,26 +148,19 @@ function cooperation(path) {
   const byNode = new Map(events.map(event => [event.seq, event]))
   let numbered = 0
   let answered = 0
+  let keptAll = 0
   for (const seq of nodes) {
     const event = byNode.get(seq)
     if (event?.type !== 'tool/result') continue
-    for (const leaf of textLeaves(event.data?.message)) {
-      if (/^\[\d+\] /.test(leaf.text)) numbered += 1
-    }
+    const leaves = textLeaves(event.data?.message)
+    if (!leaves.some(leaf => /^\[\d+\] /.test(leaf.text))) continue
+    numbered += 1
+    const { found, all } = parseKeep(findKeepSource(events, seq))
+    if (!found) continue
+    answered += 1
+    if (all) keptAll += 1
   }
-  for (const event of events) {
-    if (event.type !== 'assistant/message') continue
-    // Only reasoning counts. Prose that merely mentions the contract -- a
-    // reply discussing this plugin, for instance -- would otherwise be read as
-    // the model answering it, which inflates the cooperation rate with the
-    // words of whoever was talking about the feature.
-    const joined = (event.data?.message?.content ?? [])
-      .filter(block => block?.type === 'reasoning')
-      .map(block => block.text)
-      .join('\n')
-    if (/(?:^|\n)\s*keep:\s*\d/i.test(joined)) answered += 1
-  }
-  return { numbered, answered }
+  return { numbered, answered, keptAll }
 }
 
 function main(argv) {
@@ -171,6 +174,7 @@ function main(argv) {
   let distilled = 0
   let numbered = 0
   let answered = 0
+  let keptAll = 0
   let saved = 0
   const ratios = []
   const problems = []
@@ -191,15 +195,18 @@ function main(argv) {
     ratios.push(...report.keepRatios)
     numbered += coop.numbered
     answered += coop.answered
+    keptAll += coop.keptAll
     for (const problem of report.problems) problems.push(`${report.id.slice(0, 18)} ${problem}`)
     if (report.distilled > 0) touched.push(report)
   }
 
   process.stdout.write(`audited ${String(logs.length)} session(s)\n\n`)
-  process.stdout.write(`numbered results        ${numbered}\n`)
-  process.stdout.write(`assistant replies with a keep: line  ${answered}\n`)
-  process.stdout.write(`distilled nodes         ${distilled}\n`)
-  process.stdout.write(`bytes removed           ${saved} (${(saved / 1024).toFixed(1)} KB)\n`)
+  process.stdout.write(`numbered results         ${numbered}\n`)
+  process.stdout.write(`  answered by next reply ${answered}`
+    + (numbered > 0 ? ` (${((answered / numbered) * 100).toFixed(1)}%)\n` : '\n'))
+  process.stdout.write(`  of which keep: all     ${keptAll}\n`)
+  process.stdout.write(`distilled nodes          ${distilled}\n`)
+  process.stdout.write(`bytes removed            ${saved} (${(saved / 1024).toFixed(1)} KB)\n`)
   if (ratios.length > 0) {
     const average = ratios.reduce((sum, value) => sum + value, 0) / ratios.length
     process.stdout.write(`kept share of lines     mean ${(average * 100).toFixed(1)}%, `
@@ -221,8 +228,8 @@ function main(argv) {
     }
   }
   if (numbered > 0 && distilled === 0) {
-    process.stdout.write('\nnumbered results exist but none are distilled: '
-      + 'the model has not produced a keep: line yet\n')
+    process.stdout.write('\nnumbered results exist but nothing was distilled: the answers '
+      + 'named lines that did not shrink the result, or none answered at all\n')
   }
 }
 

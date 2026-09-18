@@ -48,6 +48,8 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "check": "node scripts/check-sync.mjs",
+    "link-host-deps": "node scripts/link-host-deps.mjs",
+    "postinstall": "node scripts/link-host-deps.mjs --optional",
     "test": "vitest run",
     "measure": "node scripts/measure.mjs",
     "prepublishOnly": "npm run check && npm test",

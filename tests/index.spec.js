@@ -9,6 +9,7 @@ import {
   readEvents,
   resultCallId,
   resolveConfig,
+  SELF_NUMBERED_TOOLS,
   summarize,
   toolNameOf,
 } from '../src/index.js'
@@ -216,7 +217,12 @@ describe('keep source', () => {
       type: 'assistant/message',
       data: { turn: 1, step: 3, message: { role: 'assistant', content: [reasoning('keep: 3,7,12')] } },
     })
-    expect(planDistillation(events[2], events, CONFIG).skip).toBe('no-keep-line')
+    // The window fix still matters under default drop, and it matters more:
+    // a late line must not reach back to claim a result it never saw, or the
+    // bug would now silently empty history instead of merely skipping it.
+    const plan = planDistillation(events[2], events, CONFIG)
+    expect(plan.keptIndices).toEqual([])
+    expect(plan.replacement).toContain('nothing needed later')
   })
 })
 
@@ -231,9 +237,15 @@ describe('distillation plan', () => {
     expect(plan.replacement).toContain('full: session seq 2')
   })
 
-  it('skips a node the model said nothing about', () => {
+  it('drops a node the model said nothing about', () => {
+    // Default drop: silence is not an exemption, it is the ordinary case. The
+    // model names what it still needs and everything else goes, so a result
+    // nobody spoke for keeps only its handle.
     const events = log({ keep: undefined })
-    expect(planDistillation(events[2], events, CONFIG).skip).toBe('no-keep-line')
+    const plan = planDistillation(events[2], events, CONFIG)
+    expect(plan.skip).toBeUndefined()
+    expect(plan.keptIndices).toEqual([])
+    expect(plan.replacement).toContain('nothing needed later')
   })
 
   it('skips an out-of-range index rather than dropping unrequested lines', () => {
@@ -241,14 +253,59 @@ describe('distillation plan', () => {
     expect(planDistillation(events[2], events, CONFIG).skip).toBe('index-out-of-range')
   })
 
-  it('skips a malformed keep line', () => {
+  it('drops on a malformed keep line, which is the default anyway', () => {
+    // Under default drop an unreadable answer is not safer than no answer, and
+    // the profile that runs this has its owner in the loop with the audit and
+    // the seq handle as the way back.
     const events = log({ keep: 'three' })
     expect(planDistillation(events[2], events, CONFIG).skip).toBe('malformed-keep-line')
   })
 
-  it('skips an empty selection rather than deleting the whole result', () => {
+  it('drops everything when the model names nothing', () => {
+    // `keep: none` is the explicit form of the default. It used to be refused
+    // as indistinguishable from a misread contract; under default drop it is
+    // simply the honest answer for a result with no lasting value.
     const events = log({ keep: 'none' })
-    expect(planDistillation(events[2], events, CONFIG).skip).toBe('empty-keep-line')
+    const plan = planDistillation(events[2], events, CONFIG)
+    expect(plan.skip).toBeUndefined()
+    expect(plan.keptIndices).toEqual([])
+  })
+
+  it('treats `keep: all` as an answer that leaves the node whole', () => {
+    // A mandatory contract needs a legal way to decline distillation, and that
+    // decline must not be read as a malformed line or as an empty selection.
+    const events = log({ keep: 'all' })
+    expect(planDistillation(events[2], events, CONFIG).skip).toBe('keep-all')
+  })
+
+  it('leaves every result of a `keep: all` step untouched', () => {
+    // The answer is per-result but written once, so it must hold for every
+    // numbered result the reply was answering -- not just the first one.
+    // Seqs must stay in log order: the reply has to come after both results for
+    // either of them to have an answer to read.
+    const events = log({ keep: 'all', answered: false })
+    const second = {
+      seq: 4,
+      type: 'tool/result',
+      data: {
+        turn: 1,
+        step: 1,
+        source: { kind: 'tool', callId: 'c2' },
+        message: {
+          role: 'user',
+          content: [{ type: 'tool-result', toolCallId: 'c2', content: [text(LONG)], isError: false }],
+        },
+      },
+    }
+    events.push({ seq: 3, type: 'tool/call', data: { turn: 1, step: 1, callId: 'c2', name: 'exec_command' } })
+    events.push(second)
+    events.push({
+      seq: 5,
+      type: 'assistant/message',
+      data: { turn: 1, step: 2, message: { role: 'assistant', content: [reasoning('plan\nkeep: all')] } },
+    })
+    expect(planDistillation(events[2], events, CONFIG).skip).toBe('keep-all')
+    expect(planDistillation(events[4], events, CONFIG).skip).toBe('keep-all')
   })
 
   it('is idempotent: an already distilled node is never distilled twice', () => {
@@ -323,7 +380,7 @@ describe('mounting', () => {
     apply(ctx, {})
     expect(sections).toHaveLength(1)
     expect(sections[0].name).toBe(PROMPT_SECTION)
-    expect(sections[0].text()).toContain('keep: <line>,<line>,...')
+    expect(sections[0].text()).toContain('keep: ???')
   })
 
   it('asks for no prompt text once numbering is off', () => {
@@ -366,7 +423,7 @@ describe('mounting', () => {
       async () => ({ kind: 'accept' }),
     )
     expect(decision.content[0].text.startsWith('[1] row 1')).toBe(true)
-    expect(decision.content[1].text).toContain('keep: <line>,<line>,...')
+    expect(decision.content[1].text).toContain('keep: ???')
   })
 
   it('leaves a short result untouched', async () => {
@@ -607,5 +664,82 @@ describe('summarize', () => {
     const summary = summarize([{ seq: 0, type: 'step/start', data: { turn: 1, step: 1 } }])
     expect(summary.distilled).toBe(0)
     expect(summary.numbered).toBe(0)
+  })
+})
+
+describe('history_read', () => {
+  /** Mount and capture the registered tool definition. */
+  function mountTools(config) {
+    const registered = []
+    const ctx = {
+      on: () => {},
+      systemPrompt: { section: () => {} },
+      inject: (_services, callback) => callback({
+        tools: { register: definition => registered.push(definition) },
+      }),
+      logger: { info: vi.fn(), warn: vi.fn() },
+    }
+    apply(ctx, config)
+    return registered[0]
+  }
+
+  it('registers a tool that reads a result back by seq', () => {
+    const tool = mountTools({})
+    expect(tool.name).toBe('history_read')
+    // defineTool compiles the author schema into raw JSON Schema, so the
+    // required marker arrives as an array on the root rather than a per-field
+    // flag. That compilation is worth asserting: it is what rejects a malformed
+    // call before execute ever runs.
+    expect(tool.parameters.type).toBe('object')
+    expect(tool.parameters.required).toContain('seq')
+    expect(tool.parameters.properties.seq.type).toBe('number')
+  })
+
+  it('returns the original text of a distilled node', async () => {
+    // The point of the tool: after distillation the ORIGINAL is what the model
+    // can no longer see, so reading it back is the only way a drop is undone.
+    const events = log({ keep: '3' })
+    const session = { snapshotEvents: () => events }
+    const tool = mountTools({})
+    const value = await tool.execute({ seq: 2 }, { agent: { session } })
+    expect(value.text).toContain('<original seq="2"')
+    expect(value.text).toContain('row 1')
+    expect(value.text).toContain('row 40')
+  })
+
+  it('refuses a seq that holds no tool result', async () => {
+    const events = log({ keep: '3' })
+    const tool = mountTools({})
+    const value = await tool.execute({ seq: 0 }, { agent: { session: { snapshotEvents: () => events } } })
+    expect(value.text).toContain('not a tool result')
+  })
+
+  it('refuses a seq that is not in the log rather than inventing content', async () => {
+    const events = log({ keep: '3' })
+    const tool = mountTools({})
+    const value = await tool.execute({ seq: 999 }, { agent: { session: { snapshotEvents: () => events } } })
+    expect(value.text).toContain('no event at seq 999')
+  })
+
+  it('refuses a non-integer seq', async () => {
+    // The compiled schema rejects this at the boundary, which is stronger than
+    // a runtime check inside execute: a malformed call never reaches the body.
+    const tool = mountTools({})
+    await expect(tool.execute({ seq: 'later' }, { agent: { session: { snapshotEvents: () => [] } } }))
+      .rejects.toThrow(/must be a number/)
+  })
+
+  it('does not offer line numbering of its own', async () => {
+    const events = log({ keep: '3' })
+    const tool = mountTools({})
+    const value = await tool.execute({ seq: 2 }, { agent: { session: { snapshotEvents: () => events } } })
+    expect(value.text).not.toMatch(/^\[\d+\] /)
+  })
+
+  it('is excluded from numbering, like read', () => {
+    // Numbering a retrieval would attach a fresh index to the very text the
+    // model fetched to escape an index, inviting it to keep: numbers that
+    // belong to a renumbered copy rather than to the original result.
+    expect(SELF_NUMBERED_TOOLS).toContain('history_read')
   })
 })

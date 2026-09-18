@@ -23,9 +23,10 @@ export declare const PROMPT_SECTION: 'stepwise-distill:contract'
 export declare const PROMPT_SECTION_ORDER: 10250
 
 /** Services read when the running profile provides them. */
-export declare const optionalInject: ['commands']
+export declare const optionalInject: ['commands', 'tools']
 
 /** Tools whose output already carries authoritative line numbers. */
+/** Tools whose output already carries its own structure and must not be numbered. */
 export declare const SELF_NUMBERED_TOOLS: string[]
 
 /** Placeholder for a result whose tool/call is missing from the log. */
@@ -82,6 +83,7 @@ export type SkipReason =
   | 'no-keep-source'
   | 'no-keep-line'
   | 'malformed-keep-line'
+  | 'keep-all'
   | 'empty-keep-line'
   | 'index-out-of-range'
   | 'not-smaller'

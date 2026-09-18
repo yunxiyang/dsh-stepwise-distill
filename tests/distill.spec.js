@@ -66,7 +66,7 @@ describe('line numbering', () => {
 describe('keep contract', () => {
   it('reads a plain index list', () => {
     expect(parseKeep([text('done\nkeep: 3,7,12')])).toEqual({
-      found: true, indices: [3, 7, 12], malformed: false,
+      found: true, indices: [3, 7, 12], malformed: false, all: false,
     })
   })
 
@@ -74,21 +74,21 @@ describe('keep contract', () => {
     expect(parseIndices('12, 3, 7, 3')).toEqual([3, 7, 12])
   })
 
-  it('prefers reasoning, which the transport layer strips anyway', () => {
+  it('prefers reasoning, which the adapter only replays on tool-call turns', () => {
     expect(parseKeep([reasoning('thinking\nkeep: 1'), text('answer')])).toEqual({
-      found: true, indices: [1], malformed: false,
+      found: true, indices: [1], malformed: false, all: false,
     })
   })
 
   it('reads a keep line from reasoning when no text block exists', () => {
     expect(parseKeep([reasoning('keep: 2,4')])).toEqual({
-      found: true, indices: [2, 4], malformed: false,
+      found: true, indices: [2, 4], malformed: false, all: false,
     })
   })
 
   it('reports absence rather than an empty selection', () => {
     expect(parseKeep([text('all done, nothing to keep')])).toEqual({
-      found: false, indices: [], malformed: false,
+      found: false, indices: [], malformed: false, all: false,
     })
   })
 
@@ -101,26 +101,44 @@ describe('keep contract', () => {
   })
 
   it('refuses a copied placeholder, which keeps the result intact', () => {
-    // The contract shows `<line>,<line>,...` precisely so a model cannot echo
-    // a real-looking example back. If one copies it anyway, the strict parser
-    // turns that into "no decision" rather than deleting everything.
-    expect(parseIndices('<line>,<line>,...')).toBeNull()
+    // The slot ships unfilled, so echoing it back is the likeliest wrong answer
+    // there is. It must read as "no decision", never as "keep nothing".
+    expect(parseIndices('???')).toBeNull()
+    expect(parseKeep([text('keep: ???')])).toEqual({
+      found: true, indices: [], malformed: true, all: false,
+    })
     expect(parseIndices('<line>')).toBeNull()
   })
 
   it('flags a malformed line so the node keeps its original text', () => {
     expect(parseKeep([text('keep: three')])).toEqual({
-      found: true, indices: [], malformed: true,
+      found: true, indices: [], malformed: true, all: false,
     })
   })
 
   it('treats an explicit empty selection as keeping nothing', () => {
     expect(parseKeep([text('keep: none')])).toEqual({
-      found: true, indices: [], malformed: false,
+      found: true, indices: [], malformed: false, all: false,
     })
     expect(parseKeep([text('keep:')])).toEqual({
-      found: true, indices: [], malformed: false,
+      found: true, indices: [], malformed: false, all: false,
     })
+  })
+
+  it('reads `keep: all` as an answer that distils nothing', () => {
+    // The contract is mandatory, so declining distillation has to be sayable.
+    // Without this payload a model that wants a result whole would have to name
+    // a few lines instead, dropping content it never chose to drop.
+    expect(parseKeep([text('done\nkeep: all')])).toEqual({
+      found: true, indices: [], malformed: false, all: true,
+    })
+    expect(parseKeep([text('keep: ALL')]).all).toBe(true)
+    expect(parseKeep([reasoning('keep: all')]).all).toBe(true)
+  })
+
+  it('does not mistake an index list for the keep-everything payload', () => {
+    expect(parseKeep([text('keep: 3')]).all).toBe(false)
+    expect(parseKeep([text('keep: none')]).all).toBe(false)
   })
 
   it('is case-insensitive about the prefix', () => {
@@ -230,7 +248,8 @@ describe('prompt contract', () => {
   const section = contractSection(20)
 
   it('states the exact line syntax the parser accepts', () => {
-    expect(section).toContain('keep: <line>,<line>,...')
+    expect(section).toContain('keep: ???')
+    expect(section).toContain('keep: all')
   })
 
   it('does not offer a copyable example that could be mistaken for a decision', () => {
@@ -243,10 +262,16 @@ describe('prompt contract', () => {
     expect(section).toContain('longer than 20 lines')
   })
 
-  it('makes the silent default explicit', () => {
-    // A model that omits the line must know that omission keeps everything;
-    // otherwise it may believe silence means "drop it all".
-    expect(section).toContain('without that line keeps every result of that step verbatim')
+  it('presents the answer as an unfilled slot rather than a request', () => {
+    // Filling a slot that is already on screen is harder to skip than
+    // producing a line from nothing, which is the whole point of the change
+    // away from an optional request.
+    expect(section).toContain('ends with an unfilled slot')
+    expect(section).toContain('Filling the slot is part of reading')
+  })
+
+  it('names the keep-everything answer the parser accepts', () => {
+    expect(section).toContain('keep: all')
   })
 
   it('says dropping a line is recoverable, so the choice is not destructive', () => {
