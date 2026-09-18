@@ -3,7 +3,7 @@
 在 DSH 的每一步之间,把刚产生的历史**固化**成低熵形式:工具结果只留被引用的事实,思考与过程噪声不再回传。与 token 压力触发的压缩是两件不同的事。
 
 - 状态:设计已定,待实现
-- 依据版本:`@deepseek-ai/dsh-*` `0.1.5-rc.2`(行号取自 `node_modules` 里的 `lib` 产物,升级后需复核)
+- 依据版本:`@deepseek-ai/dsh-*` `0.1.5-rc.1`(行号取自 `node_modules` 里的 `lib` 产物,升级后需复核)
 - 前置讨论结论:见 §3 的三条地基约束,其中一条否决了"用 compaction 后端承载"的原方案
 
 ---
@@ -450,6 +450,47 @@ ctx.on('llm/stream', (options: GenerateOptions, next) => {
 剥除后 865 条消息 / 787273 字节
 消息数不变(0 条被丢弃,配对关系完好),省 16.1%
 ```
+
+### 8.7 reasoning 是什么,以及它什么时候出现
+
+**reasoning 是模型输出的 token,但服务端在返回时已经把它分成了两个通道。** 这不是 DSH 拆的,是 DeepSeek API 协议层拆的:
+
+```js
+// packages/llm/llm-deepseek/src/adapter.ts
+const reasoning = delta?.reasoning_content;   // 思维链
+const content   = delta?.content;             // 正式回答
+```
+
+SSE 的每个 `delta` 里,两者是**平行字段**。adapter 各自累积成 `reasoning` 块与 `text` 块,只有非空才创建:
+
+```js
+if (typeof reasoning === "string" && reasoning.length > 0) { ... }
+```
+
+所以"一条消息没有 reasoning"不是被谁删了,而是**服务端那一轮没有发**。这与 §6.2.2 的删除是两码事:那种情况下我们删掉了内容,这里是从未有内容。
+
+**它什么时候出现:取决于任务形态,不取决于配置。** 实测一个会话(78 个请求):
+
+| | turn 1–4 | turn 5–8 | turn 9–14 |
+|---|---|---|---|
+| reasoning | 143629 B | 0 B | 0 B |
+| 工具形态 | exec×52, patch×17 | exec×81, patch×37 | exec×97, patch×23 |
+
+工具使用形态几乎相同,而 reasoning 从 143 KB 归零。与此同时**请求配置从头到尾完全一致**:
+
+```
+78 个 request/header,config 逐条相同
+reasoningEffort: "max"      ← 思考开启且最高档,从未变过
+```
+
+因此排除两个候选解释:不是 profile 关掉了思考,也不是任务类型变了。剩下的是**模型自身对"这一步要不要多想"的判断**:turn 1–4 是探索期(查证假设、反复推翻结论),之后进入执行期(按已知路径推进)。
+
+**这对收益预期的影响是正面的,但需要写清楚:**
+
+- 内耗**不随会话变长而线性累积**,而是**聚集在探索行为发生的轮次**。剥除机制只在有探索的会话上有收益,执行型长会话可能一直不触发;
+- 但这正是我们想要的:**要去掉的是内耗过程本身。没有内耗,就没有需要丢弃的东西** —— 机制不触发不等于失效,而是前提未被满足;
+- 因此 §13 的"遵循率"之外还该看一个量:**reasoning 占请求体的比例**。它是这个机制的负载指标,为 0 时机制无事可做。
+
 `llm/stream` 作为**只读观测点**仍然可用:可以数 token、记录 reasoning 占比、判断某轮是否遵守了 `keep:` 契约。本插件的 P0 观测口径因此可以搬到运行时,而不只是离线脚本。
 
 ---
@@ -531,12 +572,13 @@ ctx.on('llm/stream', (options: GenerateOptions, next) => {
 3. ~~模型对 `keep:` 契约的实际遵循率(决定 P2 是否值得继续)。~~ **已测:可选语气下,56 条编号结果只有 2 条被回答(3.6%)。契约已改为义务语气并补上 `keep: all`(§6.2.1);新语气下的遵循率待复测,这仍是决定本项目去留的那一问。**
 4. ~~§8.5 判定 reasoning 无解。~~ **已推翻**:§3.1 的禁令比当年读到的更窄 —— 它只禁 `assistant/message` 携带 `sourceEventSeqs`,由此推出的是"`replace` 无法遮蔽 assistant 消息",而不是"reasoning 无法被丢弃"。正确入口是包装 `deriveMessages`(§8.6),**已实现并实测省 16.1%**。
 5. **结论契约(§6.4)的遵循率** —— 决定 reasoning 剥除是否安全。文案是纯提示词,没有协议层强制;若不达标,下一步是用工具承载结论。
+6. **reasoning 的负载比例**(§8.7)—— 剥除机制的负载指标。实测会话里它聚集在前 4 轮(探索期)而非均匀分布,因此机制的收益取决于会话里是否出现探索行为。执行型长会话可能长期不触发,那是前提未满足,不是机制失效。
 
 ---
 
 ## 14. 证据索引
 
-| 事实 | 位置(0.1.5-rc.2) |
+| 事实 | 位置(0.1.5-rc.1) |
 |---|---|
 | assistant 消息禁止 `sourceEventSeqs` | `dsh-session/lib/index.js:285` |
 | replace 必须覆盖所有被遮蔽节点 | 同上 `:299` |
@@ -553,7 +595,13 @@ ctx.on('llm/stream', (options: GenerateOptions, next) => {
 | `agent/request` 不能改 messages | 同上 `:328` |
 | `agent/turn-stopping` 仅在 inbox 空时跑 | `dsh-agent-loop/lib/index.js` 的 `turn()` |
 | pi-ai:内容权威、元数据不匹配则降级 | `dsh-llm-pi-ai/lib/index.js:229-260` |
-| deepseek 回传全部历史 reasoning | `dsh-llm-deepseek/lib/index.js:110-125` |
+| deepseek 回传全部历史 reasoning(无条件拼接) | `dsh-llm-deepseek/lib/index.js:110-125` |
+| reasoning 与 content 是 SSE delta 的平行字段 | 同上 `:1261,1268` |
+| reasoning 块仅在 `reasoning_content` 非空时创建 | 同上 `:1262` |
+| 会话标题请求主动关闭思考 | 同上 `:32` |
+| 思考由请求参数控制(`thinking` / `reasoning_effort`) | 同上 `:242-243` |
+| `reasoningEffort` 从持久化配置延续,且要求 provider+model 匹配 | `dsh-agent-loop/lib/index.js:1135-1136` |
+| 请求头逐条落盘可审计 | `request/header` 事件(`data.header.config`) |
 | `CompactionEngine` 接口形状 | `dsh-compaction/lib/types/index.d.ts` |
 | 压缩范围端点须 balanced | 同上 `compactRange` 文档 |
 | BlockAssembler:max-tokens 丢 tool call;已关闭 index 忽略 delta | `dsh-llm/lib/types/assembler.d.ts` |
