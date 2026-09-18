@@ -41,6 +41,15 @@ export const name = 'stepwise-distill'
 /** Settings namespace the Host serves and the browser card claims. */
 export const SETTINGS_NAMESPACE = 'stepwise-distill'
 
+/**
+ * Services this plugin reads.
+ *
+ * `systemPrompt` must be declared: cordis throws on property access without a
+ * matching entry, so the prompt contract cannot be registered opportunistically.
+ * The service ships in the base bundle, so every profile has it.
+ */
+export const inject = ['systemPrompt']
+
 /** Default line threshold above which a tool result is numbered. */
 export const DEFAULT_MIN_LINES = 20
 
@@ -234,6 +243,29 @@ export function apply(ctx, config) {
     + `minLines=${resolved.minLines} debug=${String(resolved.debug)}`)
 
   /**
+   * Register one hook, tolerating an event the running profile does not declare.
+   *
+   * Hook registration goes through cordis's event registry, which rejects a
+   * name the host never declared. `agent/pre-step` is a waterfall owned by
+   * `dsh-agent`, so a profile that runs without the agent loop -- a one-shot
+   * headless task, for instance -- has no such event, and the plugin must
+   * still load there because numbering runs earlier and independently.
+   *
+   * @param event - event name to subscribe.
+   * @param handler - listener for that event.
+   * @returns whether the hook was registered.
+   */
+  const listen = (event, handler) => {
+    try {
+      ctx.on(event, handler)
+      return true
+    } catch (error) {
+      ctx.logger?.warn?.(`[${name}] hook "${event}" unavailable: ${String(error)}`)
+      return false
+    }
+  }
+
+  /**
    * Tell the model that numbered results exist and how to answer them.
    *
    * Without this the contract is unguessable: the numbering alone does not say
@@ -241,8 +273,8 @@ export function apply(ctx, config) {
    * distills anything. The text is empty when numbering is off, so the section
    * costs nothing on a profile that only observes.
    */
-  const registerContract = (prompt) => {
-    prompt.section({
+  try {
+    ctx.systemPrompt.section({
       name: PROMPT_SECTION,
       order: PROMPT_SECTION_ORDER,
       // Evaluated per assembly, so a Settings-UI change to minLines takes
@@ -252,22 +284,12 @@ export function apply(ctx, config) {
         return live.minLines > 0 ? contractSection(live.minLines) : ''
       },
     })
+  } catch (error) {
+    // A prompt contribution is a convenience: numbering and solidification
+    // read the loader config and keep working without it, so a rejected
+    // section must not take the plugin down.
+    ctx.logger?.warn?.(`[${name}] prompt section not installed: ${String(error)}`)
   }
-  if (typeof ctx.systemPrompt?.section === 'function') {
-    registerContract(ctx.systemPrompt)
-  } else if (typeof ctx.inject === 'function') {
-    // Registration is advisory: the hooks below work from the loader config
-    // even when no prompt service is present, so a missing service must not
-    // take the plugin down.
-    ctx.inject(['systemPrompt'], (promptCtx) => {
-      try {
-        registerContract(promptCtx.systemPrompt)
-      } catch (error) {
-        ctx.logger?.warn?.(`[${name}] prompt section not installed: ${String(error)}`)
-      }
-    })
-  }
-
   /**
    * Number long tool results as they are produced.
    *
@@ -275,7 +297,7 @@ export function apply(ctx, config) {
    * must see the numbers while it still has the content in view -- that is what
    * its `keep:` line refers to.
    */
-  ctx.on('tools/post-execute', async (exec, result, next) => {
+  listen('tools/post-execute', async (exec, result, next) => {
     const decision = await next()
     const current = resolveConfig(config)
     if (decision?.kind !== 'accept' || current.minLines <= 0) return decision
@@ -304,14 +326,18 @@ export function apply(ctx, config) {
    * with `agent.session` in hand. Step 1 is skipped because no completed turn
    * exists yet to distill.
    */
-  ctx.on('agent/pre-step', async ({ agent, turn, step, signal }) => {
+  listen('agent/pre-step', async ({ agent, turn, step, signal }, next) => {
+    // This hook is a waterfall: the loop reads `kind` off the returned
+    // decision, so the chain must always be resumed. Solidification is a side
+    // effect around it, never a replacement for it.
+    const decision = await next()
     // Nothing has completed during the session's first turn, so there is
     // nothing to solidify yet. Later turns may distill on their first step:
     // the turn boundary, not the step number, is what makes work final.
-    if (turn <= 1) return
+    if (turn <= 1) return decision
     const current = resolveConfig(config)
     const events = readEvents(agent?.session)
-    if (events.length === 0) return
+    if (events.length === 0) return decision
 
     const plans = []
     for (const event of events) {
@@ -324,7 +350,7 @@ export function apply(ctx, config) {
         ctx.logger?.info?.(`[${name}] seq ${event.seq} left as-is: ${plan.skip}`)
       }
     }
-    if (plans.length === 0) return
+    if (plans.length === 0) return decision
 
     const saved = plans.reduce(
       (sum, plan) => sum + (plan.originalBytes - plan.replacement.length),
@@ -333,7 +359,7 @@ export function apply(ctx, config) {
     if (current.mode === 'observe') {
       ctx.logger?.info?.(`[${name}] observe: turn ${turn} step ${step} would distill `
         + `${plans.length} result(s), saving ~${saved} chars`)
-      return
+      return decision
     }
 
     let committed = 0
@@ -349,6 +375,7 @@ export function apply(ctx, config) {
     }
     ctx.logger?.info?.(`[${name}] distilled ${committed}/${plans.length} result(s) before `
       + `turn ${turn} step ${step}, ~${saved} chars`)
+    return decision
   })
 }
 

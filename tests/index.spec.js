@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
   apply,
+  inject,
   PROMPT_SECTION,
   findKeepSource,
   isEligible,
@@ -51,6 +52,17 @@ function log({ result = LONG, keep, tool = 'exec_command', isError = false, answ
 }
 
 const CONFIG = resolveConfig({})
+
+/** What the loop's own pre-step default returns. */
+const ENTER = { kind: 'enter', messages: [] }
+
+/**
+ * Invoke the pre-step waterfall the way the agent loop does: the handler must
+ * be handed `next` and its result is the loop's decision.
+ */
+function step(handlers, payload, decision = ENTER) {
+  return handlers.get('agent/pre-step')(payload, async () => decision)
+}
 
 describe('config', () => {
   it('defaults to observe so nothing is destroyed before it is measured', () => {
@@ -233,31 +245,18 @@ describe('mounting', () => {
     expect(sections[0].text()).toBe('')
   })
 
-  it('registers the contract through inject when no prompt service is mounted', () => {
-    const sections = []
-    const injectors = []
-    const ctx = {
-      on: () => {},
-      inject: (services, callback) => injectors.push({ services, callback }),
-      logger: { info: vi.fn(), warn: vi.fn() },
-    }
-    apply(ctx, {})
-    expect(injectors).toHaveLength(1)
-    expect(injectors[0].services).toEqual(['systemPrompt'])
-    injectors[0].callback({ systemPrompt: { section: value => sections.push(value) } })
-    expect(sections[0].name).toBe(PROMPT_SECTION)
-  })
-
   it('survives a prompt service that rejects the section', () => {
     const ctx = {
       on: () => {},
-      inject: (services, callback) => callback({
-        systemPrompt: { section: () => { throw new Error('duplicate section name') } },
-      }),
+      systemPrompt: { section: () => { throw new Error('duplicate section name') } },
       logger: { info: vi.fn(), warn: vi.fn() },
     }
     expect(() => apply(ctx, {})).not.toThrow()
     expect(ctx.logger.warn.mock.calls.flat().join('\n')).toContain('duplicate section')
+  })
+
+  it('declares systemPrompt, which cordis requires before property access', () => {
+    expect(inject).toEqual(['systemPrompt'])
   })
 
   it('mounts without any prompt service at all', () => {
@@ -292,14 +291,14 @@ describe('mounting', () => {
   it('never distils during the first step, when no turn has completed', async () => {
     const { handlers } = mount({ mode: 'distill' })
     const session = { snapshotEvents: () => log({ keep: '3' }) }
-    await handlers.get('agent/pre-step')({ agent: { session }, turn: 1, step: 1 })
+    await step(handlers, { agent: { session }, turn: 1, step: 1 })
     expect(session.append).toBeUndefined()
   })
 
   it('logs but does not mutate in observe mode', async () => {
     const { handlers, ctx } = mount({ mode: 'observe' })
     const session = { snapshotEvents: () => log({ keep: '3' }) }
-    await handlers.get('agent/pre-step')({ agent: { session }, turn: 2, step: 2 })
+    await step(handlers, { agent: { session }, turn: 2, step: 2 })
     expect(session.append).toBeUndefined()
     expect(ctx.logger.info.mock.calls.flat().join('\n')).toContain('observe')
   })
@@ -309,7 +308,7 @@ describe('mounting', () => {
     const events = log({ keep: '3' })
     const append = vi.fn()
     const session = { snapshotEvents: () => events, append }
-    await handlers.get('agent/pre-step')({ agent: { session }, turn: 2, step: 2 })
+    await step(handlers, { agent: { session }, turn: 2, step: 2 })
 
     expect(append).toHaveBeenCalledTimes(1)
     const [type, payload, meta] = append.mock.calls[0]
@@ -327,7 +326,7 @@ describe('mounting', () => {
     const events = log({ keep: '3' })
     events[2].data.turn = 5
     const append = vi.fn()
-    await handlers.get('agent/pre-step')({
+    await step(handlers, {
       agent: { session: { snapshotEvents: () => events, append } },
       turn: 5,
       step: 2,
@@ -341,20 +340,38 @@ describe('mounting', () => {
       snapshotEvents: () => log({ keep: '3' }),
       append: () => { throw new Error('surface rejected the replace') },
     }
-    await expect(handlers.get('agent/pre-step')({ agent: { session }, turn: 2, step: 2 }))
-      .resolves.toBeUndefined()
+    await expect(step(handlers, { agent: { session }, turn: 2, step: 2 }))
+      .resolves.toEqual(ENTER)
     expect(ctx.logger.warn.mock.calls.flat().join('\n')).toContain('surface rejected')
   })
 
   it('stops committing when the step is aborted', async () => {
     const { handlers } = mount({ mode: 'distill' })
     const append = vi.fn()
-    await handlers.get('agent/pre-step')({
+    await step(handlers, {
       agent: { session: { snapshotEvents: () => log({ keep: '3' }), append } },
       turn: 2,
       step: 2,
       signal: { aborted: true },
     })
     expect(append).not.toHaveBeenCalled()
+  })
+
+  it('resumes the waterfall instead of replacing the loop decision', async () => {
+    // A pre-step handler that swallows the decision leaves the loop reading
+    // `kind` off undefined, which kills the whole turn.
+    const { handlers } = mount({ mode: 'distill' })
+    const session = { snapshotEvents: () => log({ keep: '3' }) }
+    const decision = await step(handlers, { agent: { session }, turn: 2, step: 2 })
+    expect(decision).toEqual(ENTER)
+  })
+
+  it('passes a rejection through untouched', async () => {
+    const { handlers } = mount({ mode: 'distill' })
+    const session = { snapshotEvents: () => log({ keep: '3' }) }
+    const decision = await step(handlers, { agent: { session }, turn: 2, step: 2 },
+      { kind: 'reject' })
+    expect(decision).toEqual({ kind: 'reject' })
+    expect(session.append).toBeUndefined()
   })
 })
