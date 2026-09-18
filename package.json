@@ -1,0 +1,63 @@
+{
+  "name": "dsh-stepwise-distill",
+  "version": "0.1.0",
+  "description": "Solidify DSH session history step by step: rewrite tool results in place to the facts the model actually kept, so long conversations stop re-sending noise every turn.",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek",
+    "deepseek-harness",
+    "context",
+    "history",
+    "distill",
+    "token"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yunxiyang/dsh-stepwise-distill.git"
+  },
+  "type": "module",
+  "sideEffects": false,
+  "engines": {
+    "node": ">=20"
+  },
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./distill": {
+      "default": "./lib/distill.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/index.d.ts",
+    "lib/distill.js",
+    "cordis.patch.yml",
+    "CHANGELOG.md",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "check": "node scripts/check-sync.mjs",
+    "test": "vitest run",
+    "measure": "node scripts/measure.mjs",
+    "prepublishOnly": "npm run check && npm test"
+  },
+  "devDependencies": {
+    "vitest": "4.1.11"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "dependencies": {
+    "@deepseek-ai/schemastery": "^3.18.2"
+  }
+}
