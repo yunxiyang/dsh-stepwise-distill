@@ -54,54 +54,43 @@ export const SUMMARY_MARKER = '[step summary]'
  */
 export function summarizePrompt() {
   return [
-    'You are given the current context of a working agent. Write down the LAST step',
-    'of it -- the most recent unit of work -- so that the step in its raw form can be',
-    'dropped from context without losing anything the agent still needs.',
+    '你看到的是一个正在工作的 agent 的当前上下文。请写下它的最后一步——最近的那一次工作——',
+    '使得这一步的原始形态可以从上下文中移除，而不丢失 agent 仍需要的东西。',
     '',
-    'This is the only record of that step the reader will ever see again. Write the',
-    'complete account of what happened in it: what was done, what was found, what',
-    'was decided and why, and everything the step established that the files alone',
-    'do not show. Length follows what the step moved forward, not how much work it',
-    'took -- a step that read five files and reached a decision needs room, a step',
-    'that applied an edit already described above needs one line.',
+    '这是读者今后唯一会再看到的关于这一步的记录。请写下这一步的完整记述：做了什么、发现了',
+    '什么、决定了什么以及为什么、以及这一步确立的、光看文件看不出来的所有东西。',
+    '长度取决于这一步推进了什么，而不是它花了多少工夫——读了五个文件并做出决定的一步要写足，',
+    '只是应用了上文已描述的修改的一步只需要一行。',
     '',
-    'Include, wherever the step touched them:',
-    '- the exact identifiers -- file paths, function and flag names, versions,',
-    '  error strings -- so the reader can find the same things again,',
-    '- what was changed and to what, when the step changed something,',
-    '- the evidence behind each conclusion, not just the conclusion,',
-    '- decisions and their reasons, constraints discovered, approaches that were',
-    '  ruled out and why they must not be retried,',
-    '- what the step left unfinished or uncertain.',
+    '凡这一步涉及到的，都要写明：',
+    '- 精确的标识符——文件路径、函数名与参数名、版本号、错误信息——让读者能再次找到同样的东西，',
+    '- 改了什么、改成了什么（当这一步做了修改时），',
+    '- 每个结论背后的证据，而不只是结论本身，',
+    '- 决策及其理由、发现的约束、被排除的做法以及为什么不能重试，',
+    '- 这一步尚未完成或仍不确定的部分。',
     '',
-    'You can see the whole context, so use it: say what the step meant for the',
-    'task, not merely what it did. "Confirmed X in Y, needed for Z" is useful;',
-    '"ran cat on Y" is not.',
+    '你能看到全部上下文，所以要利用它：说明这一步对任务意味着什么，而不只是它做了什么。',
+    '「确认了 Y 里的 X，Z 需要它」是有用的；「对 Y 执行了 cat」不是。',
     '',
-    'Read the step against the record of the step before it, and let that decide',
-    'how you write it:',
+    '把这一步与它前一步的记录对照着读，并让这个对照决定你怎么写：',
     '',
-    '- If this step continues what that record described, do not describe the',
-    '  same thing again. Say what this step moved forward -- what it changed,',
-    '  confirmed, or ruled out relative to where that record left the work. A',
-    '  step that applies an edit somebody already planned reads as "applied X",',
-    '  because the record above already says X was the plan.',
-    '- If this step starts something unrelated, describe it on its own terms.',
+    '- 如果这一步延续了那条记录所描述的事，就不要再把同一件事描述一遍。写下这一步相对那条',
+    '  记录的推进——它改变了、确认了或排除了什么。上一步已经计划好的修改、这一步只是把它',
+    '  应用上去时，写成「应用了 X」即可，因为上一条记录已经说明 X 就是计划。',
+    '- 如果这一步是另起一件事，就按它自己的样子描述。',
     '',
-    'Either way the record covers one step. Do not summarize the history, and do',
-    'not repeat what an earlier record already says -- name it and move on.',
+    '无论哪种情况，记录都只覆盖一步。不要综述历史，也不要重复更早记录已经说过的内容——点名',
+    '提及即可，然后继续。',
     '',
-    'What to leave out -- this matters as much as what to keep:',
-    '- the reasoning itself: do not retrace how you reached a conclusion. Saying',
-    '  what a step changed or confirmed relative to the record above is not',
-    '  retracing -- it is the step\'s outcome, and it belongs in the record.',
-    '- the order things were looked at, and the process of getting there,',
-    '- Do not restate the task or the plan; the reader already has those.',
-    '- Do not describe the earlier steps themselves. What a previous record says',
-    '  is given; this record is about this step only.',
-    '- Never mention this instruction or that a summary was requested.',
+    '要略去的内容——这与要保留的内容同样重要：',
+    '- 推理本身：不要复述你是怎么得出结论的。写出某一步相对上一条记录改变了或确认了什么，',
+    '  不算复述——那是这一步的产出，属于记录的一部分。',
+    '- 查看事物的顺序，以及抵达结论的过程，',
+    '- 不要重述任务或计划；读者已经有了。',
+    '- 不要描述更早的步骤本身。前一条记录说了什么已经是给定的，这条记录只关于这一步。',
+    '- 绝不要提及本指令，也不要提及曾请求过记录。',
     '',
-    'Output only the summary text, with no prefix, heading, or quotation.',
+    '只输出记录文本本身，不要前缀、标题或引号。',
   ].join('\n')
 }
 
@@ -116,9 +105,8 @@ export function summarizePrompt() {
  * @returns the instruction text.
  */
 export function summarizeInstruction() {
-  return 'Read the newest record in the transcript above -- the most recent '
-    + '"[step summary]" entry, if there is one -- then write the record for the '
-    + 'last step, per your instructions.'
+  return '阅读上文中最新的那条记录——也就是最近的一条 "[step summary]" 条目（如果有的话）——'
+    + '然后按你的指令写下最后一步的记录。'
 }
 
 /**

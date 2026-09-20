@@ -476,8 +476,8 @@ describe('summarize installation', () => {
     const messages = calls[0].messages
     // system instruction, the context, then the one-line instruction
     expect(messages.length).toBe(3)
-    expect(messages[0].content[0].text).toContain('current context of a working agent')
-    expect(messages.at(-1).content[0].text).toContain('Read the newest record in the transcript above')
+    expect(messages[0].content[0].text).toContain('一个正在工作的 agent 的当前上下文')
+    expect(messages.at(-1).content[0].text).toContain('阅读上文中最新的那条记录')
   })
 
   it('does nothing when a step is still in flight', async () => {
@@ -761,8 +761,8 @@ describe('summary dispatch contract', () => {
     const target = session()
     await preStep({ agent: { session: target }, turn: 2, step: 1 }, () => Promise.resolve({ kind: 'enter' }))
     const messages = seen.dispatched.messages
-    expect(messages[0].content[0].text).toContain('current context of a working agent')
-    expect(messages.at(-1).content[0].text).toContain('Read the newest record in the transcript above')
+    expect(messages[0].content[0].text).toContain('一个正在工作的 agent 的当前上下文')
+    expect(messages.at(-1).content[0].text).toContain('阅读上文中最新的那条记录')
   })
 })
 

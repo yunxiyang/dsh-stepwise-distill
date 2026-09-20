@@ -21,35 +21,35 @@ describe('summary prompt', () => {
     // is the only record of that step the agent sees again. An earlier version
     // asked for "1-3 sentences" and produced summaries too thin to work from --
     // the agent lost the thread and re-asked what it had already answered.
-    expect(flat).toContain('the only record of that step')
-    expect(flat).toContain('complete account of what happened')
-    expect(flat).toContain('Length follows what the step moved forward')
+    expect(flat).toContain('这是读者今后唯一会再看到的关于这一步的记录')
+    expect(flat).toContain('请写下这一步的完整记述')
+    expect(flat).toContain('长度取决于这一步推进了什么')
     expect(flat).not.toContain('1-3 sentences')
   })
 
   it('names what must survive the step', () => {
-    expect(flat).toContain('exact identifiers')
-    expect(flat).toContain('what was changed')
-    expect(flat).toContain('the evidence behind each conclusion')
-    expect(flat).toContain('ruled out')
-    expect(flat).toContain('left unfinished')
+    expect(flat).toContain('精确的标识符')
+    expect(flat).toContain('改了什么、改成了什么')
+    expect(flat).toContain('每个结论背后的证据')
+    expect(flat).toContain('被排除的做法')
+    expect(flat).toContain('尚未完成')
   })
 
   it('tells the summarizer the whole context is available to it', () => {
-    expect(flat).toContain('You can see the whole context')
-    expect(flat).toContain('what the step meant for the task')
+    expect(flat).toContain('你能看到全部上下文')
+    expect(flat).toContain('这一步对任务意味着什么')
   })
 
   it('scopes the answer to the last step only', () => {
-    expect(flat).toContain('If this step continues what that record described')
+    expect(flat).toContain('如果这一步延续了那条记录所描述的事')
   })
 
   it('keeps the reasoning out', () => {
     // Restating the thinking recreates, one level up, the churn this exists to
     // remove -- so what to leave out is as load-bearing as what to keep.
-    expect(flat).toContain("the step's outcome, and it belongs in the record")
-    expect(flat).toContain('the order things were looked at')
-    expect(flat).toContain('Do not restate the task')
+    expect(flat).toContain('那是这一步的产出，属于记录的一部分')
+    expect(flat).toContain('查看事物的顺序')
+    expect(flat).toContain('不要重述任务或计划')
   })
 })
 
