@@ -3,7 +3,7 @@
 在 DSH 的每一步之间,让**过程不进上下文、有用的信息留下**:模型自己的推理在投影时剥离,每个已完成的 step 由它保留下来的信息代表。与 token 压力触发的压缩是两件不同的事。
 
 - 状态:两条机制已实现(reasoning 剥离 + 每步保留信息),`stepSummary` 默认关闭
-- 已验证:宿主真实 `Session` 上的连续性(`tests/continuity.spec.js`),见 §6.5
+- 已验证:宿主真实 `Session` 上的连续性(`tests/continuity.spec.js`、`tests/dispatch.spec.js`),以及隔离 profile 上 `deepseek-flash` 的真实运行(§6.5)
 - 依据版本:`@deepseek-ai/dsh-*` `0.1.5-rc.1`(行号取自 `node_modules` 里的 `lib` 产物,升级后需复核)
 - 前置讨论结论:见 §3 的三条地基约束,其中一条否决了"用 compaction 后端承载"的原方案
 
@@ -323,9 +323,32 @@ turn 2 step 5: reasoning 17895 B, text 146 B
 
 **安全网。** 日志不动,原文永远可读(`history_read` 支持按 seq 读 `tool/result` 与 `tool/call`)。
 
+**真实运行暴露的两个 surface 约束。** 只在真实会话里出现,本地替身测不出来:
+
+1. `sourceEventSeqs` 必须覆盖区间内**全部** surface 节点,不只是带 `turn`/`step` 的那些。一个 step 的区间还包含循环围绕它写下的消息,漏掉任何一条都会被拒:`sourceEventSeqs must include every shadowed surface node`。
+2. 区间**不能包含系统提示**。surface 只允许它被另一条恰好覆盖该节点的 `system/message` 改写,所以区间起点必须落在它之后:`node 0 holds the system prompt and may be rewritten only by a system/message over exactly that node`。
+
+**消息必须带 `role` 与 `id`。** `deriveMessages` 对 `user/message` 原样返回 `event.data`,所以用裸对象写入的保留信息会以"没有 role 的消息"进入请求。必须经由宿主的 `createUserMessage` 构造。
+
 **验证状态。** `tests/continuity.spec.js` 用宿主真实的 `Session` 与 `deriveMessages()` 断言三件事:任务指令仍在、保留信息确实覆盖了刚刚完成的 step、第二个请求同时带着第一步和第二步的发现。用真实宿主是因为要检验的正是"宿主实际组装出的请求",手写替身只会回答替身被写成的样子。
 
-尚未验证:真实 provider 上的保留质量、恢复会话后的行为、与宿主 compaction 同时作用时的交互。
+**替换范围只能覆盖本步产物。** 真实会话里一个 step 涉及两类节点:它产出的材料(assistant 消息、tool 调用与结果)带该步的 `turn`/`step`;它据以工作的输入(系统提示、用户任务、plugin 注入)不带,却排在产物之间。
+
+最初按"首尾带 `turn`/`step` 的事件"取区间,把用户任务一起替换掉了,请求里只剩下一条保留信息。一次真实运行里模型因此说:
+
+> The user has given me a step summary. There's no explicit question. ... There's no further instruction.
+
+现在的规则:区间只取本步产物构成的连续段,并要求段内每个节点都属于该步;产物之间夹着输入节点时,该步没有可寻址的区间,就跳过替换、保留原文。
+
+**投影层不再重复过滤。** 早先保留信息的 step 还会在 `deriveMessages` 里再被过滤一次。那是同一批节点被删两次,而且第二次不受区间约束:它按 `message.id → turn/step` 删除,会把系统提示和用户任务一并带走。替换已经在日志层完成,投影只负责剥离 reasoning。
+
+**真实运行确认可用。** 隔离 profile 上跑 `deepseek-flash`,模型的原话:
+
+> The tool result was distilled away, but the step summaries say the file contains 73. The task is complete — I should report the number rather than calling read again.
+
+工具结果被替换、结论由保留信息承载、模型据此继续而不是重跑 —— 这是机制的目标状态。
+
+尚未验证:恢复会话后的行为、与宿主 compaction 同时作用时的交互、以及长会话中保留质量的稳定性。
 
 ### 6.6 静默失败必须可读
 
