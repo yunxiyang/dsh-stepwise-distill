@@ -17,6 +17,7 @@
     "type": "git",
     "url": "git+https://github.com/yunxiyang/dsh-stepwise-distill.git"
   },
+  "homepage": "https://github.com/yunxiyang/dsh-stepwise-distill#readme",
   "type": "module",
   "sideEffects": false,
   "engines": {

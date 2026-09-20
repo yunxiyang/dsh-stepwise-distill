@@ -1,0 +1,29 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install
+        run: npm install --no-audit --no-fund
+      - name: Bundle sync
+        run: npm run check
+      - name: Syntax check
+        run: |
+          node --check src/index.js
+          node --check src/distill.js
+          node --check src/summarize.js
+          node --check scripts/lib/events.mjs
+      - name: Tests
+        run: npx vitest run tests/summarize.spec.js tests/distill.spec.js tests/events.spec.js
+      - name: Package dry run
+        run: npm pack --dry-run
