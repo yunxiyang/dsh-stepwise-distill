@@ -649,6 +649,74 @@ describe('summary dispatch contract', () => {
     expect(target.appended).toHaveLength(1)
   })
 
+  it('falls back when a model does not offer the requested reasoning effort', async () => {
+    // A real run against a provider without `off` failed every request with
+    // UNSUPPORTED_REASONING_EFFORT while the task itself completed normally --
+    // indistinguishable, from outside, from the mechanism being switched off.
+    // Omitting the field lets the host apply the model's own default.
+    const attempts = []
+    const llm = {
+      prepareCall: async (config) => {
+        attempts.push(config)
+        if (config.reasoningEffort !== undefined) {
+          const error = new Error('does not support reasoning effort "off"')
+          error.code = 'UNSUPPORTED_REASONING_EFFORT'
+          throw error
+        }
+        return {
+          config: { provider: config.provider, model: config.model, maxTokens: 4096 },
+          stream: () => (async function* () {
+            yield { type: 'block-start', index: 0, blockType: 'text' }
+            yield { type: 'text-delta', index: 0, text: 'settled X' }
+            yield { type: 'block-end', index: 0, block: { type: 'text', text: 'settled X' } }
+            yield { type: 'finish', reason: { kind: 'stop' } }
+          })(),
+        }
+      },
+    }
+    const registered = []
+    apply({
+      on: (event, handler) => registered.push([event, handler]),
+      systemPrompt: { section: () => {} },
+      inject: (_s, cb) => cb({ llm }),
+      logger: { info: () => {}, warn: () => {} },
+    }, { stepSummary: true })
+    const target = session()
+    await registered.find(([e]) => e === 'agent/pre-step')[1](
+      { agent: { session: target }, turn: 2, step: 1 },
+      () => Promise.resolve({ kind: 'enter' }),
+    )
+    expect(attempts).toHaveLength(2)
+    expect(attempts[0].reasoningEffort).toBe('off')
+    expect(attempts[1].reasoningEffort).toBeUndefined()
+    expect(target.appended).toHaveLength(1)
+  })
+
+  it('does not swallow a failure that is not about reasoning effort', async () => {
+    const llm = {
+      prepareCall: async () => {
+        const error = new Error('rate limited')
+        error.code = 'RATE_LIMITED'
+        throw error
+      },
+    }
+    const registered = []
+    apply({
+      on: (event, handler) => registered.push([event, handler]),
+      systemPrompt: { section: () => {} },
+      inject: (_s, cb) => cb({ llm }),
+      logger: { info: () => {}, warn: () => {} },
+    }, { stepSummary: true })
+    const target = session()
+    await expect(registered.find(([e]) => e === 'agent/pre-step')[1](
+      { agent: { session: target }, turn: 2, step: 1 },
+      () => Promise.resolve({ kind: 'enter' }),
+    )).resolves.toBeDefined()
+    // The retry is only for the unsupported-effort case; a rate limit must not
+    // be retried as if dropping the field would help.
+    expect(target.appended).toHaveLength(0)
+  })
+
   it('sends the whole projected context plus one instruction', async () => {
     const { preStep, seen } = mountStrict()
     const target = session()
