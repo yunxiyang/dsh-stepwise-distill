@@ -1,6 +1,12 @@
 /**
  * Stepwise history solidification for DeepSeek Harness.
  *
+ * Keeps a long conversation usable by keeping the PROCESS out of the way and
+ * the RESULT in it: the model's own reasoning is stripped at projection, and
+ * each completed step is replaced in later turns by a short summary of what it
+ * concluded. The raw material stays in the append-only log and is readable
+ * back by seq.
+ *
  * @module dsh-stepwise-distill
  */
 
@@ -10,142 +16,69 @@ export declare const name: 'stepwise-distill'
 /** Settings namespace the Host serves and the browser card claims. */
 export declare const SETTINGS_NAMESPACE: 'stepwise-distill'
 
-/** Default line threshold above which a tool result is numbered. */
-export declare const DEFAULT_MIN_LINES: 20
+/** Services cordis must resolve before the plugin body runs. */
+export declare const inject: ['systemPrompt', 'agents']
 
-/** Default operating mode: measure before mutating. */
-export declare const DEFAULT_MODE: 'observe'
+/** Services read when the running profile provides them. */
+export declare const optionalInject: ['commands', 'tools', 'llm']
 
-/** Prompt section name carrying the keep-contract instructions. */
-export declare const PROMPT_SECTION: 'stepwise-distill:contract'
+/** Placeholder used when a result cannot be matched to its call. */
+export declare const UNKNOWN_TOOL: '<unknown>'
+
+/**
+ * Non-enumerable marker recording that a session's projection is wrapped.
+ *
+ * Stored on the session rather than in module scope because sessions outlive
+ * plugin mounts: a resume, a reload, or a second mount must not wrap twice.
+ */
+export declare const REASONING_STRIPPED: symbol
+
+/** Non-enumerable marker recording which `turn/step` pairs have a summary. */
+export declare const SUMMARIZED_STEPS: symbol
 
 /** Prompt section name carrying the written-conclusion instructions. */
 export declare const REASONING_SECTION: 'stepwise-distill:reasoning'
 
-/** Non-enumerable marker recording that a session's projection is wrapped. */
-export declare const REASONING_STRIPPED: symbol
+/** Sort order placing the conclusion instructions after the host's own notes. */
+export declare const REASONING_SECTION_ORDER: 10250
 
-/** Sort order placing the contract after the harness-source and web-surface notes. */
-export declare const PROMPT_SECTION_ORDER: 10250
-
-/** Sort order placing the conclusion instructions just after the contract. */
-export declare const REASONING_SECTION_ORDER: 10251
-
-/** Services read when the running profile provides them. */
-export declare const optionalInject: ['commands', 'tools']
-
-/** Tools whose output already carries authoritative line numbers. */
-/** Tools whose output already carries its own structure and must not be numbered. */
-export declare const SELF_NUMBERED_TOOLS: string[]
-
-/** Placeholder for a result whose tool/call is missing from the log. */
-export declare const UNKNOWN_TOOL: '<unknown>'
-
-/** Totals one session's numbering and distillation. */
-export interface DistillSummary {
-  numbered: number
-  distilled: number
-  originalBytes: number
-  distilledBytes: number
-  savedBytes: number
-  keptShares: number[]
-  problems: string[]
-}
-
-/** Summarize what distillation has done to one event log. */
-export declare function summarize(events: readonly unknown[]): DistillSummary
-
-/** Render the summary as `/distill` output. */
-export declare function renderSummary(summary: DistillSummary, config: ResolvedConfig): string
-
-/** Resolve the callId pairing one result with its call. */
-export declare function resultCallId(event: unknown): string | undefined
-
-/** Whether a tool's results are outside this plugin's scope. */
-export declare function shouldSkip(toolName: unknown, config: ResolvedConfig): boolean
-
-/** Distillation policy; every field has a default, so all are optional. */
-export interface Config {
-  /** `observe` numbers and reports; `distill` also rewrites the surface. */
-  mode?: 'observe' | 'distill'
-  /** Only results longer than this many lines are numbered. */
-  minLines?: number
+/** Plugin config, as the loader or the Settings section supplies it. */
+export interface PluginConfig {
   /** Ask the model to write a conclusion into its reply at the end of each step. */
   reasoningContract?: boolean
-  /** Tool names whose results may be distilled; empty means every tool. */
-  tools?: string[]
-  /** Emit a diagnostic line for every hook evaluation. */
+  /** Ask for a step summary and hold the step's raw material out of later turns. */
+  stepSummary?: boolean
+  /** Emit a diagnostic line for every evaluation. */
   debug?: boolean
 }
 
-/** Resolved plugin policy with every default applied. */
+/** Plugin config with every default applied. */
 export interface ResolvedConfig {
-  mode: 'observe' | 'distill'
-  minLines: number
   reasoningContract: boolean
-  tools: string[]
+  stepSummary: boolean
   debug: boolean
 }
 
-/** Why one node was left untouched. */
-export type SkipReason =
-  | 'ineligible'
-  | 'no-long-leaf'
-  | 'already-distilled'
-  | 'no-keep-source'
-  | 'no-keep-line'
-  | 'malformed-keep-line'
-  | 'keep-all'
-  | 'empty-keep-line'
-  | 'index-out-of-range'
-  | 'not-smaller'
-
-/** A committed distillation plan for one tool result. */
-export interface DistillPlan {
-  /** Sequence number of the surface node to replace. */
-  seq: number
-  /** Index of the outer tool-result block holding the text. */
-  outer: number
-  /** Index of the text leaf inside that block. */
-  index: number
-  /** Byte length of the text being replaced. */
-  originalBytes: number
-  /** The distilled replacement text. */
-  replacement: string
-  /** Line numbers the model asked to keep. */
-  keptIndices: number[]
-  /** Total number of numbered lines in the original. */
-  totalLines: number
-}
-
-/** A plan, or the reason no plan was produced. */
-export type PlanResult = DistillPlan | { skip: SkipReason }
-
-/** Resolve one config snapshot with every default applied. */
-export declare function resolveConfig(config?: Config): ResolvedConfig
+/** Apply defaults to one config snapshot. */
+export declare function resolveConfig(config?: PluginConfig): ResolvedConfig
 
 /** Read a session's immutable event log across host core versions. */
-export declare function readEvents(session: unknown): unknown[]
+export declare function readEvents(session: unknown): readonly unknown[]
 
-/** Resolve the tool name behind one result event by pairing its callId. */
-export declare function toolNameOf(event: unknown, events: readonly unknown[]): string
+/** One `/distill` report. */
+export interface DistillReport {
+  steps: number
+  summarized: number
+  summaries: string[]
+  droppedBytes: number
+  droppedPieces: number
+}
 
-/** Whether one tool result is eligible for numbering and distillation. */
-export declare function isEligible(
-  event: unknown,
-  config: ResolvedConfig,
-  events: readonly unknown[],
-): boolean
+/** Summarize what the plugin is holding back from later turns. */
+export declare function summarize(events: readonly unknown[], summarized: Set<string> | undefined): DistillReport
 
-/** Collect the blocks of every assistant message between a result and the next human turn. */
-export declare function findKeepSource(events: readonly unknown[], seq: number): unknown[]
+/** Render a report as the text a `/distill` invocation shows. */
+export declare function renderSummary(report: DistillReport, config: ResolvedConfig): string
 
-/** Plan the distillation of one result event; pure and deterministic. */
-export declare function planDistillation(
-  event: unknown,
-  events: readonly unknown[],
-  config: ResolvedConfig,
-): PlanResult
-
-/** Register the numbering and solidification hooks on a Cordis context. */
-export declare function apply(ctx: unknown, config: Config): void
+/** Mount the plugin on a Cordis context. */
+export declare function apply(ctx: unknown, config?: PluginConfig): void

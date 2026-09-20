@@ -12,8 +12,10 @@ import { readFileSync } from 'node:fs'
 const PAIRS = [
   ['src/index.js', 'lib/index.js'],
   ['src/distill.js', 'lib/distill.js'],
+  ['src/summarize.js', 'lib/summarize.js'],
   ['src/index.d.ts', 'lib/index.d.ts'],
   ['src/distill.d.ts', 'lib/distill.d.ts'],
+  ['src/summarize.d.ts', 'lib/summarize.d.ts'],
 ]
 
 const failures = []

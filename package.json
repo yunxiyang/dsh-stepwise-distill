@@ -40,6 +40,8 @@
     "lib/index.d.ts",
     "lib/distill.js",
     "lib/distill.d.ts",
+    "lib/summarize.js",
+    "lib/summarize.d.ts",
     "cordis.patch.yml",
     "CHANGELOG.md",
     "README.md",
@@ -51,10 +53,7 @@
     "link-host-deps": "node scripts/link-host-deps.mjs",
     "postinstall": "node scripts/link-host-deps.mjs --optional",
     "test": "vitest run",
-    "measure": "node scripts/measure.mjs",
-    "prepublishOnly": "npm run check && npm test",
-    "audit": "node scripts/audit.mjs",
-    "undo": "node scripts/undo.mjs"
+    "prepublishOnly": "npm run check && npm test"
   },
   "devDependencies": {
     "vitest": "4.1.11"

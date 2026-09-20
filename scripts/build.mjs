@@ -13,8 +13,10 @@ import { dirname } from 'node:path'
 const PAIRS = [
   ['src/index.js', 'lib/index.js'],
   ['src/distill.js', 'lib/distill.js'],
+  ['src/summarize.js', 'lib/summarize.js'],
   ['src/index.d.ts', 'lib/index.d.ts'],
   ['src/distill.d.ts', 'lib/distill.d.ts'],
+  ['src/summarize.d.ts', 'lib/summarize.d.ts'],
 ]
 
 for (const [source, artifact] of PAIRS) {

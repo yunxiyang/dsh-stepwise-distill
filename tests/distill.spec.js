@@ -1,232 +1,15 @@
 import { describe, expect, it } from 'vitest'
 import {
-  DISTILL_MARKER,
-  buildDistilledText,
-  contractSection,
-  isDistilled,
-  isNumbered,
-  numberLines,
-  parseIndices,
-  parseKeep,
+  dropSummarizedSteps,
   reasoningContract,
+  renderHistoryRead,
   stripReasoning,
   stripReasoningFrom,
-  shouldNumber,
-  splitLines,
-  stripNumberPrefix,
-  stripNumbering,
   textLeaves,
 } from '../src/distill.js'
 
 const text = value => ({ type: 'text', text: value })
 const reasoning = value => ({ type: 'reasoning', text: value })
-
-describe('line numbering', () => {
-  it('numbers every line from one', () => {
-    expect(numberLines('a\nb\nc')).toBe('[1] a\n[2] b\n[3] c')
-  })
-
-  it('treats a trailing newline as a terminator, not an empty line', () => {
-    expect(splitLines('a\nb\n')).toEqual(['a', 'b'])
-    expect(numberLines('a\nb\n')).toBe('[1] a\n[2] b')
-  })
-
-  it('keeps interior blank lines numbered so indices stay aligned', () => {
-    expect(numberLines('a\n\nb')).toBe('[1] a\n[2] \n[3] b')
-  })
-
-  it('passes short results through unnumbered', () => {
-    expect(shouldNumber('a\nb\nc', 20)).toBe(false)
-    expect(shouldNumber(Array.from({ length: 21 }, () => 'x').join('\n'), 20)).toBe(true)
-  })
-
-  it('never numbers empty content', () => {
-    expect(shouldNumber('', 1)).toBe(false)
-    expect(shouldNumber(undefined, 1)).toBe(false)
-  })
-
-  it('never numbers a result that already carries numbering', () => {
-    // The rewrite is durable: it lands in the session log, so the next pass
-    // reads the numbers as part of the text. Numbering again would stack
-    // prefixes and shift every index the model refers to.
-    const once = numberLines(Array.from({ length: 30 }, (_, i) => `row ${i}`).join('\n'))
-    expect(isNumbered(once)).toBe(true)
-    expect(shouldNumber(once, 20)).toBe(false)
-  })
-
-  it('does not mistake content that merely starts with a bracket', () => {
-    expect(isNumbered('[note] first\nplain second\nplain third')).toBe(false)
-    expect(isNumbered('[1] only one line')).toBe(false)
-  })
-
-  it('strips a whole numbering pass, and only when one is present', () => {
-    const raw = 'alpha\nbeta\ngamma'
-    expect(stripNumbering(numberLines(raw))).toBe(raw)
-    expect(stripNumbering(raw)).toBe(raw)
-  })
-})
-
-describe('keep contract', () => {
-  it('reads a plain index list', () => {
-    expect(parseKeep([text('done\nkeep: 3,7,12')])).toEqual({
-      found: true, indices: [3, 7, 12], malformed: false, all: false,
-    })
-  })
-
-  it('sorts and de-duplicates so output is deterministic', () => {
-    expect(parseIndices('12, 3, 7, 3')).toEqual([3, 7, 12])
-  })
-
-  it('prefers reasoning, which the adapter only replays on tool-call turns', () => {
-    expect(parseKeep([reasoning('thinking\nkeep: 1'), text('answer')])).toEqual({
-      found: true, indices: [1], malformed: false, all: false,
-    })
-  })
-
-  it('reads a keep line from reasoning when no text block exists', () => {
-    expect(parseKeep([reasoning('keep: 2,4')])).toEqual({
-      found: true, indices: [2, 4], malformed: false, all: false,
-    })
-  })
-
-  it('reports absence rather than an empty selection', () => {
-    expect(parseKeep([text('all done, nothing to keep')])).toEqual({
-      found: false, indices: [], malformed: false, all: false,
-    })
-  })
-
-  it('reports a malformed list as null, never as an empty selection', () => {
-    // Reading "3, 7x" as "keep nothing" would delete a whole result on a typo.
-    expect(parseIndices('3, 7x, 12')).toBeNull()
-    expect(parseIndices('3, -7')).toBeNull()
-    expect(parseIndices('0')).toBeNull()
-    expect(parseIndices('three')).toBeNull()
-  })
-
-  it('refuses a copied placeholder, which keeps the result intact', () => {
-    // The slot ships unfilled, so echoing it back is the likeliest wrong answer
-    // there is. It must read as "no decision", never as "keep nothing".
-    expect(parseIndices('???')).toBeNull()
-    expect(parseKeep([text('keep: ???')])).toEqual({
-      found: true, indices: [], malformed: true, all: false,
-    })
-    expect(parseIndices('<line>')).toBeNull()
-  })
-
-  it('flags a malformed line so the node keeps its original text', () => {
-    expect(parseKeep([text('keep: three')])).toEqual({
-      found: true, indices: [], malformed: true, all: false,
-    })
-  })
-
-  it('treats an explicit empty selection as keeping nothing', () => {
-    expect(parseKeep([text('keep: none')])).toEqual({
-      found: true, indices: [], malformed: false, all: false,
-    })
-    expect(parseKeep([text('keep:')])).toEqual({
-      found: true, indices: [], malformed: false, all: false,
-    })
-  })
-
-  it('reads `keep: all` as an answer that distils nothing', () => {
-    // The contract is mandatory, so declining distillation has to be sayable.
-    // Without this payload a model that wants a result whole would have to name
-    // a few lines instead, dropping content it never chose to drop.
-    expect(parseKeep([text('done\nkeep: all')])).toEqual({
-      found: true, indices: [], malformed: false, all: true,
-    })
-    expect(parseKeep([text('keep: ALL')]).all).toBe(true)
-    expect(parseKeep([reasoning('keep: all')]).all).toBe(true)
-  })
-
-  it('does not mistake an index list for the keep-everything payload', () => {
-    expect(parseKeep([text('keep: 3')]).all).toBe(false)
-    expect(parseKeep([text('keep: none')]).all).toBe(false)
-  })
-
-  it('is case-insensitive about the prefix', () => {
-    expect(parseKeep([text('Keep: 5')]).indices).toEqual([5])
-  })
-})
-
-describe('distilled text', () => {
-  const RAW = Array.from({ length: 42 }, (_, i) => `line ${i + 1}`).join('\n')
-  const NUMBERED = numberLines(RAW)
-  const distilled = buildDistilledText({
-    toolName: 'exec_command',
-    isError: false,
-    totalLines: 42,
-    keptLines: NUMBERED.split('\n'),
-    keptIndices: [3, 7, 12],
-    originalText: 'x'.repeat(900),
-    seq: 8412,
-  })
-
-  it('states the tool, outcome, and line counts', () => {
-    expect(distilled).toContain('[exec_command] ok, 42 lines -> kept 3')
-  })
-
-  it('strips the counter prefix from kept facts', () => {
-    expect(distilled).toContain('3: line 3; 7: line 7; 12: line 12')
-  })
-
-  it('carries the retrieval handle for everything it drops', () => {
-    expect(distilled).toContain('full: session seq 8412 (history_read)')
-  })
-
-  it('is marked so replay cannot distill it twice', () => {
-    expect(isDistilled(distilled)).toBe(true)
-    expect(isDistilled('plain output')).toBe(false)
-  })
-
-  it('is deterministic', () => {
-    const again = buildDistilledText({
-      toolName: 'exec_command',
-      isError: false,
-      totalLines: 42,
-      keptLines: NUMBERED.split('\n'),
-      keptIndices: [3, 7, 12],
-      originalText: 'x'.repeat(900),
-      seq: 8412,
-    })
-    expect(again).toBe(distilled)
-  })
-
-  it('reports an error result distinctly', () => {
-    const failed = buildDistilledText({
-      toolName: 'exec_command',
-      isError: true,
-      totalLines: 3,
-      keptLines: ['[1] a', '[2] b', '[3] c'],
-      keptIndices: [2],
-      originalText: 'abc',
-      seq: 9,
-    })
-    expect(failed).toContain('[exec_command] ERROR, 3 lines')
-  })
-
-  it('is smaller than the original it replaces', () => {
-    expect(distilled.length).toBeLessThan(RAW.length)
-  })
-})
-
-  describe('marker parsing', () => {
-  it('ignores a marker-looking substring quoted mid-line', () => {
-    // A raw result may quote the word; treating that as distilled would
-    // permanently exempt the node from distillation.
-    expect(isDistilled('output mentions distilled: but is not marked')).toBe(false)
-  })
-
-  it('recognizes the marker only on a line of its own', () => {
-    expect(isDistilled('line one\ndistilled: 2/9 lines, 7 dropped')).toBe(true)
-    expect(isDistilled('prefix distilled: 2/9 lines')).toBe(false)
-  })
-
-  it('tolerates a missing number prefix', () => {
-    expect(stripNumberPrefix('plain line')).toBe('plain line')
-  })
-})
-
 describe('text leaves', () => {
   it('addresses each text block inside a tool-result', () => {
     const message = {
@@ -242,50 +25,7 @@ describe('text leaves', () => {
     expect(textLeaves({ content: [{ type: 'tool-result' }] })).toEqual([])
   })
 
-  it('exports its marker for the host to recognize', () => {
-    expect(DISTILL_MARKER).toBe('distilled:')
-  })
 })
-
-describe('prompt contract', () => {
-  const section = contractSection(20)
-
-  it('states the exact line syntax the parser accepts', () => {
-    expect(section).toContain('keep: ???')
-    expect(section).toContain('keep: all')
-  })
-
-  it('does not offer a copyable example that could be mistaken for a decision', () => {
-    // A concrete sample like `3,7,12` gets echoed back verbatim, which reads
-    // as a real judgement and deletes lines the model never chose.
-    expect(section).not.toMatch(/keep:\s*\d/)
-  })
-
-  it('names the threshold the plugin numbers at', () => {
-    expect(section).toContain('longer than 20 lines')
-  })
-
-  it('presents the answer as an unfilled slot rather than a request', () => {
-    // Filling a slot that is already on screen is harder to skip than
-    // producing a line from nothing, which is the whole point of the change
-    // away from an optional request.
-    expect(section).toContain('ends with an unfilled slot')
-    expect(section).toContain('Filling the slot is part of reading')
-  })
-
-  it('names the keep-everything answer the parser accepts', () => {
-    expect(section).toContain('keep: all')
-  })
-
-  it('says dropping a line is recoverable, so the choice is not destructive', () => {
-    expect(section).toContain('read the original back on demand')
-  })
-
-  it('is deterministic', () => {
-    expect(contractSection(20)).toBe(section)
-  })
-})
-
 describe('reasoning contract', () => {
   const section = reasoningContract()
 
@@ -385,5 +125,75 @@ describe('reasoning strip', () => {
     ]
     const out = stripReasoning({ role: 'assistant', content: [reasoning('r'), ...blocks] })
     expect(out.content).toEqual(blocks)
+  })
+})
+
+describe('tool call retrieval', () => {
+  const call = {
+    seq: 7,
+    type: 'tool/call',
+    data: { turn: 1, step: 1, name: 'apply_patch', arguments: '{"input":"*** Begin Patch\\n*** Update File: a.rs\\n*** End Patch"}' },
+  }
+
+  it('returns the arguments the model actually wrote', () => {
+    // The point of reading a call back: the patch text is what the model
+    // produced, and the file it patched has moved on since.
+    const out = renderHistoryRead(call, 7)
+    expect(out.ok).toBe(true)
+    expect(out.text).toContain('type="tool/call"')
+    expect(out.text).toContain('name="apply_patch"')
+    expect(out.text).toContain('Begin Patch')
+  })
+
+  it('reformats escaped JSON so the text is readable', () => {
+    // Arguments arrive as a JSON string; returning it raw would hand back a
+    // wall of escapes for a call whose only purpose is reading the patch.
+    const out = renderHistoryRead(call, 7)
+    expect(out.text).toContain('reformatted="json"')
+    expect(out.text).toContain('*** Update File: a.rs')
+    // The patch arrives as real line breaks, not a single line of `\n`.
+    expect(out.text).not.toContain('\\n')
+    const body = out.text.split('\n')
+    expect(body).toContain('*** Begin Patch')
+    expect(body).toContain('*** Update File: a.rs')
+    expect(body).toContain('*** End Patch')
+  })
+
+  it('unwraps a single-field argument to its value', () => {
+    // `{"input": "..."}` is a wrapper, not content: the model asked to read the
+    // patch, not the field name around it.
+    const out = renderHistoryRead(call, 7)
+    expect(out.text).not.toContain('input:')
+    expect(out.text.startsWith('<original')).toBe(true)
+  })
+
+  it('lists multiple fields each on its own line', () => {
+    const multi = {
+      seq: 8,
+      type: 'tool/call',
+      data: { name: 'exec_command', arguments: '{"cmd":"ls -la","timeout":30}' },
+    }
+    const out = renderHistoryRead(multi, 8)
+    expect(out.text).toContain('cmd: ls -la')
+    expect(out.text).toContain('timeout: 30')
+  })
+
+  it('returns a non-JSON argument string unchanged rather than refusing', () => {
+    const bare = { seq: 9, type: 'tool/call', data: { name: 'raw', arguments: 'plain text' } }
+    const out = renderHistoryRead(bare, 9)
+    expect(out.ok).toBe(true)
+    expect(out.text).toContain('plain text')
+    expect(out.text).not.toContain('reformatted')
+  })
+
+  it('refuses a call with no arguments', () => {
+    const empty = { seq: 11, type: 'tool/call', data: { name: 'x', arguments: '' } }
+    expect(renderHistoryRead(empty, 11).text).toContain('carries no arguments')
+  })
+
+  it('names both readable types in its refusal', () => {
+    const out = renderHistoryRead({ seq: 3, type: 'step/start', data: {} }, 3)
+    expect(out.ok).toBe(false)
+    expect(out.text).toContain('tool call')
   })
 })

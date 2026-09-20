@@ -1,91 +1,74 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
+  REASONING_SECTION,
   apply,
   inject,
-  PROMPT_SECTION,
-  REASONING_SECTION,
-  findKeepSource,
-  isEligible,
-  planDistillation,
   readEvents,
-  resultCallId,
   resolveConfig,
-  SELF_NUMBERED_TOOLS,
   summarize,
-  toolNameOf,
 } from '../src/index.js'
-import { contractSection, numberLines, parseKeep } from '../src/distill.js'
 
 const text = value => ({ type: 'text', text: value })
 const reasoning = value => ({ type: 'reasoning', text: value })
 
-/** Long enough to be numbered at the default threshold. */
-const LONG = Array.from({ length: 40 }, (_, i) => `row ${i + 1}`).join('\n')
-
 /**
- * Build the event log shape the harness really writes: a `tool/call` carrying
- * the name, its paired `tool/result`, and the assistant message that answers it.
+ * Build the event log shape the harness really writes: a step, the assistant
+ * message that ran in it, and a tool result.
  */
-function log({ result = LONG, keep, tool = 'exec_command', isError = false, answered = true } = {}) {
-  const events = [
-    { seq: 0, type: 'step/start', data: { turn: 1, step: 1 } },
-    { seq: 1, type: 'tool/call', data: { turn: 1, step: 1, callId: 'c1', name: tool } },
+function log({ turn = 1, step = 1, body = 'body' } = {}) {
+  return [
+    { seq: 0, type: 'step/start', data: { turn, step } },
+    {
+      seq: 1,
+      type: 'assistant/message',
+      data: {
+        turn,
+        step,
+        message: {
+          id: `m${String(seq_counter += 1)}`,
+          role: 'assistant',
+          content: [reasoning('churn'), text('done'), { type: 'tool-call', name: 'exec_command', arguments: '{"cmd":"ls"}' }],
+        },
+      },
+    },
     {
       seq: 2,
       type: 'tool/result',
       data: {
-        turn: 1,
-        step: 1,
-        source: { kind: 'tool', callId: 'c1' },
+        turn,
+        step,
         message: {
+          id: `m${String(seq_counter += 1)}`,
           role: 'user',
-          content: [{ type: 'tool-result', toolCallId: 'c1', content: [text(result)], isError }],
+          content: [{ type: 'tool-result', toolCallId: 'c1', content: [text(body)], isError: false }],
         },
       },
     },
+    { seq: 3, type: 'step/end', data: { turn, step } },
   ]
-  if (answered) {
-    const blocks = keep === undefined ? [text('all done')] : [reasoning(`plan\nkeep: ${keep}`)]
-    events.push({
-      seq: 3,
-      type: 'assistant/message',
-      data: { turn: 1, step: 2, message: { role: 'assistant', content: blocks } },
-    })
-  }
-  return events
 }
+let seq_counter = 0
 
 const CONFIG = resolveConfig({})
 
-/** What the loop's own pre-step default returns. */
-const ENTER = { kind: 'enter', messages: [] }
-
-/**
- * Invoke the pre-step waterfall the way the agent loop does: the handler must
- * be handed `next` and its result is the loop's decision.
- */
-function step(handlers, payload, decision = ENTER) {
-  return handlers.get('agent/pre-step')(payload, async () => decision)
-}
-
 describe('config', () => {
-  it('defaults to observe so nothing is destroyed before it is measured', () => {
-    expect(CONFIG.mode).toBe('observe')
-    expect(CONFIG.minLines).toBe(20)
-    expect(CONFIG.tools).toEqual([])
+  it('defaults to the conclusion contract on and step summary off', () => {
+    // Summary is off by default because it spends a request per step; the
+    // conclusion contract costs nothing and is on.
+    expect(CONFIG).toEqual({ reasoningContract: true, stepSummary: false, debug: false })
   })
 
   it('accepts overrides and keeps every other default', () => {
-    expect(resolveConfig({ mode: 'distill', minLines: 5 })).toEqual({
-      mode: 'distill', minLines: 5, reasoningContract: true, tools: [], debug: false,
+    expect(resolveConfig({ stepSummary: true })).toEqual({
+      reasoningContract: true, stepSummary: true, debug: false,
     })
   })
 
   it('lets the conclusion contract be switched off independently', () => {
-    // It is the part under measurement, so it has to be separable from
-    // numbering: otherwise a run cannot tell which instruction moved a number.
+    // It is the part under measurement, so it has to be separable from the
+    // summary: otherwise a run cannot tell which instruction moved a number.
     expect(resolveConfig({ reasoningContract: false }).reasoningContract).toBe(false)
-    expect(resolveConfig({ reasoningContract: false }).minLines).toBe(20)
+    expect(resolveConfig({ reasoningContract: false }).stepSummary).toBe(false)
   })
 })
 
@@ -95,607 +78,127 @@ describe('event reading', () => {
     expect(readEvents({ snapshotEvents: () => events, events: [] })).toBe(events)
   })
 
-  it('falls back to the older events getter', () => {
+  it('falls back to a plain events array', () => {
     const events = [{ seq: 0 }]
     expect(readEvents({ events })).toBe(events)
   })
 
-  it('degrades to an empty log rather than throwing', () => {
-    expect(readEvents(undefined)).toEqual([])
+  it('returns an empty list rather than throwing on a session with neither', () => {
     expect(readEvents({})).toEqual([])
+    expect(readEvents(undefined)).toEqual([])
   })
 })
 
-describe('tool name resolution', () => {
-  it('pairs a result with its call by callId', () => {
-    const events = log()
-    expect(toolNameOf(events[2], events)).toBe('exec_command')
-  })
-
-  it('reads the callId from the message block when the event omits it', () => {
-    // Real logs differ: some results carry data.source.callId, others only
-    // expose the pairing on the tool-result block itself.
-    const events = log()
-    delete events[2].data.source
-    expect(toolNameOf(events[2], events)).toBe('exec_command')
-  })
-
-  it('prefers the event-level callId when both are present', () => {
-    const events = log()
-    events[2].data.message.content[0].toolCallId = 'stale'
-    expect(toolNameOf(events[2], events)).toBe('exec_command')
-  })
-
-  it('reports no callId for a non-result event', () => {
-    expect(resultCallId({ type: 'step/start', data: {} })).toBeUndefined()
-  })
-
-  it('reports an unknown name instead of guessing', () => {
-    expect(toolNameOf({ data: { source: { callId: 'nope' } } }, log())).toBe('<unknown>')
-  })
-})
-
-describe('eligibility', () => {
-  it('accepts a numbered-length result', () => {
-    expect(isEligible(log()[2], CONFIG, log())).toBe(true)
-  })
-
-  it('rejects a short result, which is not worth numbering', () => {
-    const events = log({ result: 'a\nb' })
-    expect(isEligible(events[2], CONFIG, events)).toBe(false)
-  })
-
-  it('honours an explicit tool allowlist', () => {
-    const events = log({ tool: 'read' })
-    const config = resolveConfig({ tools: ['exec_command'] })
-    expect(isEligible(events[2], config, events)).toBe(false)
-  })
-
-  it('excludes a self-numbered tool by default', () => {
-    const events = log({ tool: 'read' })
-    expect(isEligible(events[2], CONFIG, events)).toBe(false)
-  })
-
-  it('excludes an unknown tool rather than guessing', () => {
-    // A result whose tool/call is absent from the log: nothing says how its
-    // output is shaped, so it is left alone.
-    const events = log().filter(event => event.type !== 'tool/call')
-    const result = events.find(event => event.type === 'tool/result')
-    expect(isEligible(result, CONFIG, events)).toBe(false)
-  })
-
-  it('ignores events that are not tool results', () => {
-    expect(isEligible(log()[0], CONFIG, log())).toBe(false)
-  })
-})
-
-describe('keep source', () => {
-  it('reads the answering assistant message', () => {
-    const events = log({ keep: '3' })
-    expect(findKeepSource(events, 2)).toEqual([reasoning('plan\nkeep: 3')])
-  })
-
-  it('stops at the next human turn instead of reaching past it', () => {
-    const events = log({ keep: '3' })
-    events.splice(3, 0, { seq: 3, type: 'user/message', data: { content: [text('hi')] } })
-    expect(findKeepSource(events, 2)).toEqual([])
-  })
-
-  it('returns nothing when the turn ended before any answer', () => {
-    expect(findKeepSource(log({ answered: false }), 2)).toEqual([])
-  })
-
-  it('answers only from the next assistant message', () => {
-    // One decision answers one result. A keep: line written much later belongs
-    // to whatever step produced it, not to every result before it -- reading
-    // it as agreement with all of them silently distils unjudged output.
-    const events = log({ keep: '3' })
-    events.splice(3, 0, {
-      seq: 3,
-      type: 'assistant/message',
-      data: { turn: 1, step: 2, message: { role: 'assistant', content: [text('reading it now')] } },
-    })
-    events[4].seq = 4
-    expect(findKeepSource(events, 2)).toEqual([text('reading it now')])
-    expect(parseKeep(findKeepSource(events, 2)).found).toBe(false)
-  })
-
-  it('does not let a late keep: line claim an earlier result', () => {
-    // The shape that produced the bug: steps 2..N each yield a result, and a
-    // single keep: line appears at the very end of the turn.
-    const events = log({ keep: '3' })
-    events.pop()
-    events.push({
-      seq: 3,
-      type: 'assistant/message',
-      data: { turn: 1, step: 2, message: { role: 'assistant', content: [text('done with that')] } },
-    })
-    events.push({
-      seq: 4,
-      type: 'tool/result',
-      data: {
-        turn: 1,
-        step: 3,
-        source: { kind: 'tool', callId: 'c2' },
-        message: { content: [{ type: 'tool-result', toolCallId: 'c2', content: [text(LONG)] }] },
-      },
-    })
-    events.push({
-      seq: 5,
-      type: 'assistant/message',
-      data: { turn: 1, step: 3, message: { role: 'assistant', content: [reasoning('keep: 3,7,12')] } },
-    })
-    // The window fix still matters under default drop, and it matters more:
-    // a late line must not reach back to claim a result it never saw, or the
-    // bug would now silently empty history instead of merely skipping it.
-    const plan = planDistillation(events[2], events, CONFIG)
-    expect(plan.keptIndices).toEqual([])
-    expect(plan.replacement).toContain('nothing needed later')
-  })
-})
-
-describe('distillation plan', () => {
-  it('plans a replacement when the model named lines', () => {
-    const events = log({ keep: '3,7' })
-    const plan = planDistillation(events[2], events, CONFIG)
-    expect(plan.skip).toBeUndefined()
-    expect(plan.seq).toBe(2)
-    expect(plan.keptIndices).toEqual([3, 7])
-    expect(plan.replacement).toContain('3: row 3; 7: row 7')
-    expect(plan.replacement).toContain('full: session seq 2')
-  })
-
-  it('drops a node the model said nothing about', () => {
-    // Default drop: silence is not an exemption, it is the ordinary case. The
-    // model names what it still needs and everything else goes, so a result
-    // nobody spoke for keeps only its handle.
-    const events = log({ keep: undefined })
-    const plan = planDistillation(events[2], events, CONFIG)
-    expect(plan.skip).toBeUndefined()
-    expect(plan.keptIndices).toEqual([])
-    expect(plan.replacement).toContain('nothing needed later')
-  })
-
-  it('skips an out-of-range index rather than dropping unrequested lines', () => {
-    const events = log({ keep: '3,999' })
-    expect(planDistillation(events[2], events, CONFIG).skip).toBe('index-out-of-range')
-  })
-
-  it('drops on a malformed keep line, which is the default anyway', () => {
-    // Under default drop an unreadable answer is not safer than no answer, and
-    // the profile that runs this has its owner in the loop with the audit and
-    // the seq handle as the way back.
-    const events = log({ keep: 'three' })
-    expect(planDistillation(events[2], events, CONFIG).skip).toBe('malformed-keep-line')
-  })
-
-  it('drops everything when the model names nothing', () => {
-    // `keep: none` is the explicit form of the default. It used to be refused
-    // as indistinguishable from a misread contract; under default drop it is
-    // simply the honest answer for a result with no lasting value.
-    const events = log({ keep: 'none' })
-    const plan = planDistillation(events[2], events, CONFIG)
-    expect(plan.skip).toBeUndefined()
-    expect(plan.keptIndices).toEqual([])
-  })
-
-  it('treats `keep: all` as an answer that leaves the node whole', () => {
-    // A mandatory contract needs a legal way to decline distillation, and that
-    // decline must not be read as a malformed line or as an empty selection.
-    const events = log({ keep: 'all' })
-    expect(planDistillation(events[2], events, CONFIG).skip).toBe('keep-all')
-  })
-
-  it('leaves every result of a `keep: all` step untouched', () => {
-    // The answer is per-result but written once, so it must hold for every
-    // numbered result the reply was answering -- not just the first one.
-    // Seqs must stay in log order: the reply has to come after both results for
-    // either of them to have an answer to read.
-    const events = log({ keep: 'all', answered: false })
-    const second = {
-      seq: 4,
-      type: 'tool/result',
-      data: {
-        turn: 1,
-        step: 1,
-        source: { kind: 'tool', callId: 'c2' },
-        message: {
-          role: 'user',
-          content: [{ type: 'tool-result', toolCallId: 'c2', content: [text(LONG)], isError: false }],
-        },
-      },
+describe('migration notice', () => {
+  it('does not resurrect the numbering contract', () => {
+    // The keep: mechanism is gone, not merely off: nothing should register a
+    // section that asks a model to name line numbers.
+    const sections = []
+    const ctx = {
+      on: () => {},
+      systemPrompt: { section: value => sections.push(value) },
+      inject: () => {},
+      logger: { info: vi.fn(), warn: vi.fn() },
     }
-    events.push({ seq: 3, type: 'tool/call', data: { turn: 1, step: 1, callId: 'c2', name: 'exec_command' } })
-    events.push(second)
-    events.push({
-      seq: 5,
-      type: 'assistant/message',
-      data: { turn: 1, step: 2, message: { role: 'assistant', content: [reasoning('plan\nkeep: all')] } },
-    })
-    expect(planDistillation(events[2], events, CONFIG).skip).toBe('keep-all')
-    expect(planDistillation(events[4], events, CONFIG).skip).toBe('keep-all')
-  })
-
-  it('is idempotent: an already distilled node is never distilled twice', () => {
-    const source = log({ keep: '3' })
-    const first = planDistillation(source[2], source, CONFIG)
-    // The distilled text is short, so the threshold is lowered to isolate the
-    // marker gate from the length gate: replay must still refuse to re-distil.
-    const replay = resolveConfig({ minLines: 1, mode: 'distill' })
-    const distilledEvents = log({ result: first.replacement, keep: '3' })
-    expect(planDistillation(distilledEvents[2], distilledEvents, replay).skip)
-      .toBe('already-distilled')
-  })
-
-  it('refuses a replacement that would not shrink the result', () => {
-    const events = log({ result: LONG, keep: '1' })
-    const config = resolveConfig({ minLines: 1, mode: 'distill' })
-    const plan = planDistillation(events[2], events, config)
-    // Keeping one line of a 40-line result must shrink it; sanity-check the
-    // opposite direction is still guarded by asserting the plan is smaller.
-    expect(plan.replacement.length).toBeLessThan(LONG.length)
-  })
-
-  it('honours a zero-index range by refusing it', () => {
-    const events = log({ keep: '0' })
-    expect(planDistillation(events[2], events, CONFIG).skip).toBe('malformed-keep-line')
-  })
-
-  it('reuses numbering already present in the result', () => {
-    // A durable post-execute rewrite means the log holds numbered text. The
-    // plan must read the existing numbers, not add a second set: the model
-    // chose its indices from those.
-    const numberedText = numberLines(LONG)
-    const events = log({ result: numberedText, keep: '3,7' })
-    const plan = planDistillation(events[2], events, CONFIG)
-    expect(plan.skip).toBeUndefined()
-    expect(plan.totalLines).toBe(40)
-    expect(plan.replacement).toContain('3: row 3; 7: row 7')
-    // The kept facts carry the original text without a stacked prefix.
-    expect(plan.replacement).not.toContain('[3]')
-    expect(plan.replacement).not.toContain('[7]')
+    apply(ctx, {})
+    expect(sections.map(section => section.name)).toEqual([REASONING_SECTION])
   })
 })
 
 describe('mounting', () => {
-  /** Capture the handlers a Cordis context receives. */
-  function mount(config) {
+  function mount(config = {}) {
     const handlers = new Map()
     const sections = []
     const ctx = {
       on: (event, handler) => handlers.set(event, handler),
       systemPrompt: { section: value => sections.push(value) },
-      inject: (services, callback) => callback({}),
+      inject: () => {},
       logger: { info: vi.fn(), warn: vi.fn() },
     }
     apply(ctx, config)
     return { handlers, ctx, sections }
   }
 
-  it('registers both hooks', () => {
+  it('registers only the pre-step hook, since nothing rewrites results now', () => {
     const { handlers } = mount({})
-    expect(handlers.has('tools/post-execute')).toBe(true)
     expect(handlers.has('agent/pre-step')).toBe(true)
+    expect(handlers.has('tools/post-execute')).toBe(false)
   })
 
-  it('registers the prompt contract so the syntax is discoverable', () => {
-    const sections = []
-    const ctx = {
-      on: () => {},
-      systemPrompt: { section: value => sections.push(value) },
-      logger: { info: vi.fn(), warn: vi.fn() },
-    }
-    apply(ctx, {})
-    const names = sections.map(section => section.name)
-    expect(names).toContain(PROMPT_SECTION)
-    expect(names).toContain(REASONING_SECTION)
-    const contract = sections.find(section => section.name === PROMPT_SECTION)
-    expect(contract.text()).toContain('keep: ???')
-  })
-
-  it('asks for the written-conclusion contract on every step', () => {
-    // Separate from numbering on purpose: a conclusion is worth recording
-    // whether or not anything was numbered, and this instruction is the one
-    // under measurement.
-    const sections = []
-    const ctx = {
-      on: () => {},
-      systemPrompt: { section: value => sections.push(value) },
-      logger: { info: vi.fn(), warn: vi.fn() },
-    }
-    apply(ctx, { minLines: 0 })
-    const reasoning = sections.find(section => section.name === REASONING_SECTION)
-    expect(reasoning.text()).toContain('NOT kept between steps')
-  })
-
-  it('asks for no numbering text once numbering is off', () => {
-    const sections = []
-    const ctx = {
-      on: () => {},
-      systemPrompt: { section: value => sections.push(value) },
-      logger: { info: vi.fn(), warn: vi.fn() },
-    }
-    apply(ctx, { minLines: 0 })
-    const contract = sections.find(section => section.name === PROMPT_SECTION)
-    expect(contract.text()).toBe('')
+  it('registers no tool-result numbering', () => {
+    const { handlers } = mount({})
+    expect(handlers.has('tools/post-execute')).toBe(false)
   })
 
   it('survives a prompt service that rejects the section', () => {
     const ctx = {
       on: () => {},
       systemPrompt: { section: () => { throw new Error('duplicate section name') } },
+      inject: () => {},
       logger: { info: vi.fn(), warn: vi.fn() },
     }
     expect(() => apply(ctx, {})).not.toThrow()
     expect(ctx.logger.warn.mock.calls.flat().join('\n')).toContain('duplicate section')
   })
 
-  it('declares systemPrompt, which cordis requires before property access', () => {
-    expect(inject).toEqual(['systemPrompt'])
+  it('declares the services cordis requires before property access', () => {
+    // `agents` is not a convenience: `agent/pre-step` is dispatched through an
+    // agent-scoped carrier, and a subscription registered before that service
+    // is ready never fires. Without it the plugin loads, the prompt section
+    // appears, and the step hook is silently dead.
+    expect(inject).toEqual(['systemPrompt', 'agents'])
   })
 
   it('mounts without any prompt service at all', () => {
     const handlers = new Map()
-    const ctx = { on: (event, handler) => handlers.set(event, handler), logger: {} }
+    const ctx = { on: (event, handler) => handlers.set(event, handler), inject: () => {}, logger: {} }
     expect(() => apply(ctx, {})).not.toThrow()
     expect(handlers.has('agent/pre-step')).toBe(true)
   })
 
-  it('numbers a long result and appends the contract', async () => {
-    const { handlers } = mount({})
-    const decision = await handlers.get('tools/post-execute')(
-      { name: 'exec_command' },
-      { content: [text(LONG)] },
-      async () => ({ kind: 'accept' }),
-    )
-    expect(decision.content[0].text.startsWith('[1] row 1')).toBe(true)
-    expect(decision.content[1].text).toContain('keep: ???')
-  })
-
-  it('leaves a short result untouched', async () => {
-    const { handlers } = mount({})
-    const original = { kind: 'accept' }
-    const decision = await handlers.get('tools/post-execute')(
-      { name: 'exec_command' },
-      { content: [text('a\nb')] },
-      async () => original,
-    )
-    expect(decision).toBe(original)
-  })
-
-  it('never re-numbers a tool that numbers its own output', async () => {
-    // `read` renders real file line numbers inside its envelope; a second
-    // numbering would put [2] and 2: side by side with different meanings.
-    const { handlers } = mount({})
-    const original = { kind: 'accept' }
-    const decision = await handlers.get('tools/post-execute')(
-      { name: 'read' },
-      { content: [text(LONG)] },
-      async () => original,
-    )
-    expect(decision).toBe(original)
-  })
-
-  it('honours the tools allowlist when numbering', async () => {
-    const { handlers } = mount({ tools: ['exec_command'] })
-    const original = { kind: 'accept' }
-    const decision = await handlers.get('tools/post-execute')(
-      { name: 'bash' },
-      { content: [text(LONG)] },
-      async () => original,
-    )
-    expect(decision).toBe(original)
-  })
-
-  it('skips a result whose tool name is unknown', async () => {
-    const { handlers } = mount({})
-    const original = { kind: 'accept' }
-    const decision = await handlers.get('tools/post-execute')(
-      {}, { content: [text(LONG)] }, async () => original,
-    )
-    expect(decision).toBe(original)
-  })
-
-  it('numbers the content with no direct decision content', async () => {
-    // The real pipeline returns a bare accept; the text lives on the result.
-    const { handlers } = mount({})
-    const decision = await handlers.get('tools/post-execute')(
-      { name: 'bash' },
-      { content: [text(LONG)] },
-      async () => ({ kind: 'accept' }),
-    )
-    expect(decision.kind).toBe('accept')
-    expect(decision.content[0].text.startsWith('[1] row 1')).toBe(true)
-  })
-
-  it('passes a block decision through untouched', async () => {
-    const { handlers } = mount({})
-    const blocked = { kind: 'block', feedback: [text('nope')] }
-    const decision = await handlers.get('tools/post-execute')(
-      { name: 'bash' },
-      { content: [text(LONG)] },
-      async () => blocked,
-    )
-    expect(decision).toBe(blocked)
-  })
-
-  it('distils on the very first step once a keep: line exists', async () => {
-    // Distillation is gated by the model's decision, not by turn or step
-    // boundaries: a result answered with a keep: line is settled, whatever
-    // turn it came from.
-    const { handlers } = mount({ mode: 'distill' })
-    const append = vi.fn()
-    const session = { snapshotEvents: () => log({ keep: '3' }), append }
-    await step(handlers, { agent: { session }, turn: 1, step: 1 })
-    expect(append).toHaveBeenCalledTimes(1)
-  })
-
-  it('logs but does not mutate in observe mode', async () => {
-    const { handlers, ctx } = mount({ mode: 'observe' })
-    const session = { snapshotEvents: () => log({ keep: '3' }) }
-    await step(handlers, { agent: { session }, turn: 2, step: 2 })
-    expect(session.append).toBeUndefined()
-    expect(ctx.logger.info.mock.calls.flat().join('\n')).toContain('observe')
-  })
-
-  it('replaces the surface node in distill mode', async () => {
-    const { handlers } = mount({ mode: 'distill' })
-    const events = log({ keep: '3' })
-    const append = vi.fn()
-    const session = { snapshotEvents: () => events, append }
-    await step(handlers, { agent: { session }, turn: 2, step: 2 })
-
-    expect(append).toHaveBeenCalledTimes(1)
-    const [type, payload, meta] = append.mock.calls[0]
-    expect(type).toBe('tool/result')
-    expect(meta.surfaceOp).toEqual({ op: 'replace', startSeq: 2, endSeq: 2 })
-    expect(meta.sourceEventSeqs).toEqual([2])
-    // The rewrite must describe the node it replaces; the harness compares
-    // turn and step against the original and rejects any difference.
-    expect(payload.turn).toBe(1)
-    expect(payload.step).toBe(1)
-    // Structure must survive: the pairing id and error flag are not ours to change.
-    expect(payload.message.content[0].toolCallId).toBe('c1')
-    expect(payload.message.content[0].isError).toBe(false)
-    expect(payload.message.content[0].content[0].text).toContain('distilled:')
-  })
-
-  it('leaves a result alone until the model has answered it', async () => {
-    // The only gate is the keep: line. A result still being worked on has no
-    // assistant message after it, so there is nothing to act on yet.
-    const { handlers } = mount({ mode: 'distill' })
-    const events = log({ keep: '3' })
-    events.pop()
-    const append = vi.fn()
-    await step(handlers, {
-      agent: { session: { snapshotEvents: () => events, append } },
-      turn: 5,
-      step: 2,
-    })
-    expect(append).not.toHaveBeenCalled()
-  })
-
-  it('survives a failing append without blocking the step', async () => {
-    const { handlers, ctx } = mount({ mode: 'distill' })
-    const session = {
-      snapshotEvents: () => log({ keep: '3' }),
-      append: () => { throw new Error('surface rejected the replace') },
-    }
-    await expect(step(handlers, { agent: { session }, turn: 2, step: 2 }))
-      .resolves.toEqual(ENTER)
-    expect(ctx.logger.warn.mock.calls.flat().join('\n')).toContain('surface rejected')
-  })
-
-  it('stops committing when the step is aborted', async () => {
-    const { handlers } = mount({ mode: 'distill' })
-    const append = vi.fn()
-    await step(handlers, {
-      agent: { session: { snapshotEvents: () => log({ keep: '3' }), append } },
-      turn: 2,
-      step: 2,
-      signal: { aborted: true },
-    })
-    expect(append).not.toHaveBeenCalled()
-  })
-
   it('resumes the waterfall instead of replacing the loop decision', async () => {
-    // A pre-step handler that swallows the decision leaves the loop reading
-    // `kind` off undefined, which kills the whole turn.
-    const { handlers } = mount({ mode: 'distill' })
-    const session = { snapshotEvents: () => log({ keep: '3' }) }
-    const decision = await step(handlers, { agent: { session }, turn: 2, step: 2 })
-    expect(decision).toEqual(ENTER)
+    const { handlers } = mount({})
+    const preStep = handlers.get('agent/pre-step')
+    const decision = await preStep({ agent: {}, turn: 1, step: 1 }, () => Promise.resolve({ kind: 'enter' }))
+    expect(decision).toEqual({ kind: 'enter' })
   })
 
   it('passes a rejection through untouched', async () => {
-    const { handlers } = mount({ mode: 'distill' })
-    const session = { snapshotEvents: () => log({ keep: '3' }) }
-    const decision = await step(handlers, { agent: { session }, turn: 2, step: 2 },
-      { kind: 'reject' })
-    expect(decision).toEqual({ kind: 'reject' })
-    expect(session.append).toBeUndefined()
-  })
-
-  it('registers a /distill command when the profile offers one', () => {
-    const registered = []
-    const ctx = {
-      on: () => {},
-      systemPrompt: { section: () => {} },
-      inject: (services, callback) => callback({
-        commands: { register: definition => registered.push(definition) },
-      }),
-      logger: { info: vi.fn(), warn: vi.fn() },
-    }
-    apply(ctx, {})
-    expect(registered).toHaveLength(1)
-    expect(registered[0].name).toBe('distill')
-  })
-
-  it('reports the live session state through the command', () => {
-    const registered = []
-    const events = log({ keep: '3' })
-    const ctx = {
-      on: () => {},
-      systemPrompt: { section: () => {} },
-      inject: (services, callback) => callback({
-        commands: { register: definition => registered.push(definition) },
-      }),
-      logger: { info: vi.fn(), warn: vi.fn() },
-    }
-    apply(ctx, { mode: 'observe' })
-    const result = registered[0].handler({ agent: { session: { snapshotEvents: () => events } } })
-    expect(result.kind).toBe('success')
-    expect(result.text).toContain('mode: observe')
-  })
-
-  it('mounts without a commands service', () => {
-    const handlers = new Map()
-    const ctx = {
-      on: (event, handler) => handlers.set(event, handler),
-      systemPrompt: { section: () => {} },
-      logger: {},
-    }
-    expect(() => apply(ctx, {})).not.toThrow()
-    expect(handlers.has('tools/post-execute')).toBe(true)
+    const { handlers } = mount({})
+    const preStep = handlers.get('agent/pre-step')
+    await expect(preStep({ agent: {}, turn: 1, step: 1 }, () => Promise.reject(new Error('boom'))))
+      .rejects.toThrow('boom')
   })
 })
 
-describe('summarize', () => {
-  it('counts numbered and distilled results separately', () => {
-    const events = log({ result: numberLines(LONG), keep: '3' })
-    const summary = summarize(events)
-    expect(summary.numbered).toBe(1)
-    expect(summary.distilled).toBe(0)
+describe('summarize report', () => {
+  it('counts steps and the material a summary withholds', () => {
+    seq_counter = 0
+    const events = [...log({ turn: 1, step: 1 }), ...log({ turn: 1, step: 2 })]
+    const report = summarize(events, new Set(['1/1']))
+    expect(report.steps).toBe(2)
+    expect(report.summarized).toBe(1)
+    // Reasoning, reply text, tool arguments and tool output are all material
+    // the projection stops re-sending once a step is summarized.
+    expect(report.droppedPieces).toBeGreaterThan(0)
+    expect(report.droppedBytes).toBeGreaterThan(0)
   })
 
-  it('reads savings and kept share out of a distilled node', () => {
-    const distilled = [
-      '[exec_command] ok, 40 lines -> kept 2: 3: row 3; 7: row 7',
-      'distilled: 2/40 lines, 38 dropped, original 900 bytes',
-      'full: session seq 2 (history_read)',
-    ].join('\n')
-    const summary = summarize(log({ result: distilled, keep: '3' }))
-    expect(summary.distilled).toBe(1)
-    expect(summary.originalBytes).toBe(900)
-    expect(summary.keptShares).toEqual([2 / 40])
+  it('reports nothing withheld before any step is summarized', () => {
+    seq_counter = 0
+    const report = summarize(log(), new Set())
+    expect(report.summarized).toBe(0)
   })
 
-  it('flags a distilled node that lost its retrieval handle', () => {
-    const orphaned = 'distilled: 2/40 lines, 38 dropped, original 900 bytes'
-    const summary = summarize(log({ result: orphaned, keep: '3' }))
-    expect(summary.problems).toEqual(['seq 2: no retrieval handle'])
-  })
-
-  it('is empty for a log with no results', () => {
-    const summary = summarize([{ seq: 0, type: 'step/start', data: { turn: 1, step: 1 } }])
-    expect(summary.distilled).toBe(0)
-    expect(summary.numbered).toBe(0)
+  it('tolerates a session with no summarization state yet', () => {
+    seq_counter = 0
+    expect(() => summarize(log(), undefined)).not.toThrow()
   })
 })
 
 describe('history_read', () => {
   /** Mount and capture the registered tool definition. */
-  function mountTools(config) {
+  function mountTools(config = {}) {
     const registered = []
     const ctx = {
       on: () => {},
@@ -710,72 +213,48 @@ describe('history_read', () => {
   }
 
   it('registers a tool that reads a result back by seq', () => {
-    const tool = mountTools({})
+    const tool = mountTools()
     expect(tool.name).toBe('history_read')
-    // defineTool compiles the author schema into raw JSON Schema, so the
-    // required marker arrives as an array on the root rather than a per-field
-    // flag. That compilation is worth asserting: it is what rejects a malformed
-    // call before execute ever runs.
-    expect(tool.parameters.type).toBe('object')
+    // defineTool compiles the author schema into raw JSON Schema, so `required`
+    // arrives as an array on the root. That compilation is what rejects a
+    // malformed call before execute ever runs.
     expect(tool.parameters.required).toContain('seq')
-    expect(tool.parameters.properties.seq.type).toBe('number')
   })
 
-  it('returns the original text of a distilled node', async () => {
-    // The point of the tool: after distillation the ORIGINAL is what the model
-    // can no longer see, so reading it back is the only way a drop is undone.
-    const events = log({ keep: '3' })
-    const session = { snapshotEvents: () => events }
-    const tool = mountTools({})
-    const value = await tool.execute({ seq: 2 }, { agent: { session } })
+  it('returns the original text of a tool result', async () => {
+    // The point of the tool: after a step is summarized the original is what
+    // the model can no longer see, so reading it back is the only way a drop
+    // is undone.
+    const events = log({ body: 'row 1\nrow 2' })
+    const tool = mountTools()
+    const value = await tool.execute({ seq: 2 }, { agent: { session: { snapshotEvents: () => events } } })
     expect(value.text).toContain('<original seq="2"')
     expect(value.text).toContain('row 1')
-    expect(value.text).toContain('row 40')
   })
 
-  it('refuses a seq that holds no tool result', async () => {
-    const events = log({ keep: '3' })
-    const tool = mountTools({})
-    const value = await tool.execute({ seq: 0 }, { agent: { session: { snapshotEvents: () => events } } })
-    expect(value.text).toContain('not a tool result')
+  it('returns the arguments of a tool call, so a summarized patch is readable', async () => {
+    const events = log()
+    const tool = mountTools()
+    const value = await tool.execute({ seq: 1 }, { agent: { session: { snapshotEvents: () => events } } })
+    // seq 1 is the assistant message; a call lives at its own seq, so this is
+    // the refusal path for a type that is neither a result nor a call.
+    expect(value.text).toContain('not a tool result or tool call')
   })
 
   it('refuses a seq that is not in the log rather than inventing content', async () => {
-    const events = log({ keep: '3' })
-    const tool = mountTools({})
-    const value = await tool.execute({ seq: 999 }, { agent: { session: { snapshotEvents: () => events } } })
+    const tool = mountTools()
+    const value = await tool.execute({ seq: 999 }, { agent: { session: { snapshotEvents: () => log() } } })
     expect(value.text).toContain('no event at seq 999')
   })
 
-  it('refuses a non-integer seq', async () => {
-    // The compiled schema rejects this at the boundary, which is stronger than
-    // a runtime check inside execute: a malformed call never reaches the body.
-    const tool = mountTools({})
+  it('rejects a non-integer seq at the schema boundary', async () => {
+    const tool = mountTools()
     await expect(tool.execute({ seq: 'later' }, { agent: { session: { snapshotEvents: () => [] } } }))
       .rejects.toThrow(/must be a number/)
-  })
-
-  it('does not offer line numbering of its own', async () => {
-    const events = log({ keep: '3' })
-    const tool = mountTools({})
-    const value = await tool.execute({ seq: 2 }, { agent: { session: { snapshotEvents: () => events } } })
-    expect(value.text).not.toMatch(/^\[\d+\] /)
-  })
-
-  it('is excluded from numbering, like read', () => {
-    // Numbering a retrieval would attach a fresh index to the very text the
-    // model fetched to escape an index, inviting it to keep: numbers that
-    // belong to a renumbered copy rather than to the original result.
-    expect(SELF_NUMBERED_TOOLS).toContain('history_read')
   })
 })
 
 describe('reasoning strip installation', () => {
-  /** Minimal session double with a deriveMessages method. */
-  function sessionWith(messages) {
-    return { deriveMessages: () => messages }
-  }
-
   /** Run one pre-step so the install path executes. */
   async function step(agent, config = {}) {
     const registered = []
@@ -792,10 +271,12 @@ describe('reasoning strip installation', () => {
   }
 
   it('strips reasoning from the session projection', async () => {
-    const session = sessionWith([
-      { role: 'user', content: [text('go')] },
-      { role: 'assistant', content: [reasoning('churn'), text('done')] },
-    ])
+    const session = {
+      deriveMessages: () => [
+        { role: 'user', content: [text('go')] },
+        { role: 'assistant', content: [reasoning('churn'), text('done')] },
+      ],
+    }
     await step({ session })
     expect(session.deriveMessages()).toEqual([
       { role: 'user', content: [text('go')] },
@@ -803,8 +284,10 @@ describe('reasoning strip installation', () => {
     ])
   })
 
-  it('leaves the log-side projection alone when switched off', async () => {
-    const session = sessionWith([{ role: 'assistant', content: [reasoning('churn'), text('done')] }])
+  it('leaves the projection alone when switched off', async () => {
+    const session = {
+      deriveMessages: () => [{ role: 'assistant', content: [reasoning('churn'), text('done')] }],
+    }
     await step({ session }, { reasoningContract: false })
     expect(session.deriveMessages()[0].content).toHaveLength(2)
   })
@@ -812,7 +295,9 @@ describe('reasoning strip installation', () => {
   it('wraps at most once across repeated steps', async () => {
     // A wrapper per step would strip the same list N times and grow the call
     // stack with the session's length.
-    const session = sessionWith([{ role: 'assistant', content: [reasoning('churn'), text('done')] }])
+    const session = {
+      deriveMessages: () => [{ role: 'assistant', content: [reasoning('churn'), text('done')] }],
+    }
     const registered = []
     const ctx = {
       on: (event, handler) => registered.push([event, handler]),
@@ -831,5 +316,379 @@ describe('reasoning strip installation', () => {
   it('keeps working when the session has no projection to wrap', async () => {
     await expect(step({})).resolves.toBeDefined()
     await expect(step(undefined)).resolves.toBeDefined()
+  })
+})
+
+describe('summarize installation', () => {
+  /**
+   * Mount with an llm double and return the pre-step hook plus the fake.
+   */
+  function mountWithLlm(reply = 'the step settled X') {
+    const registered = []
+    const calls = []
+    const llm = {
+      prepareCall: async (config) => ({ config, stream: (options) => { calls.push(options); return chunks(reply) } }),
+    }
+    const ctx = {
+      on: (event, handler) => registered.push([event, handler]),
+      systemPrompt: { section: () => {} },
+      inject: (_services, callback) => callback({ llm }),
+      logger: { info: vi.fn(), warn: vi.fn() },
+    }
+    apply(ctx, { stepSummary: true })
+    return { preStep: registered.find(([e]) => e === 'agent/pre-step')[1], calls, ctx }
+  }
+
+  /**
+   * Yield a stream in the host's REAL chunk vocabulary.
+   *
+   * The deltas are `text-delta` / `reasoning-delta`, not a generic `delta`, and
+   * a block closes with `block-end` carrying the assembled block. An earlier
+   * mock spoke a fictional `delta` protocol, so it agreed with a parser that
+   * could not read the real one -- and both reported success while every
+   * summary was discarded.
+   */
+  async function* chunks(value) {
+    yield { type: 'block-start', index: 0, blockType: 'reasoning' }
+    yield { type: 'reasoning-delta', index: 0, text: 'considering' }
+    yield { type: 'block-end', index: 0, block: { type: 'reasoning', text: 'considering' } }
+    yield { type: 'block-start', index: 1, blockType: 'text' }
+    yield { type: 'text-delta', index: 1, text: value }
+    yield { type: 'block-end', index: 1, block: { type: 'text', text: value } }
+    yield { type: 'finish', reason: { kind: 'stop' } }
+  }
+
+  /** A session whose log holds one completed step. */
+  function completedSession() {
+    seq_counter = 0
+    // A real log carries the request header that fixes the provider/model; it
+    // is the route a summary request must reuse rather than invent.
+    const log0 = [
+      {
+        seq: -1,
+        type: 'request/header',
+        data: { header: { config: { provider: 'deepseek-official', model: 'deepseek-flash' } } },
+      },
+      ...log({ turn: 1, step: 1 }),
+    ]
+    return {
+      events: log0,
+      appended: [],
+      deriveMessages: () => [{ role: 'assistant', content: [text('done')] }],
+      // Reads the property, not a captured array, so a test can edit the log
+      // it will be asked for -- filtering a step's `step/end` out, say.
+      snapshotEvents() { return this.events },
+      options: { provider: 'deepseek-official', model: 'deepseek-flash' },
+      // The surface is narrower than the log: it holds the seqs a replacement
+      // can address. A fixture without one cannot express `replace` at all.
+      surface: { nodes: log0.filter(e => e.type !== 'request/header').map(e => e.seq) },
+      // Mirrors the real Session.append contract: a surface-eligible event
+      // without a surfaceOp marker is rejected. Without this the fixture
+      // accepted appends the harness refuses, and the failure was invisible.
+      append(type, data, opts) {
+        if (type === 'user/message' && opts?.surfaceOp === undefined) {
+          throw new Error('session event "user/message" is surface-eligible and requires a surfaceOp marker')
+        }
+        this.appended.push({ type, data, opts })
+      },
+    }
+  }
+
+  it('appends a summary message after a step completes', async () => {
+    const session = completedSession()
+    const { preStep } = mountWithLlm('the step settled X')
+    await preStep({ agent: { session }, turn: 2, step: 1 }, () => Promise.resolve({ kind: 'enter' }))
+    const appended = session.appended
+    expect(appended).toHaveLength(1)
+    expect(appended[0].type).toBe('user/message')
+    // `data` IS the message for a user event this plugin appends: content sits
+    // flat on it, not nested under a `message` key.
+    expect(appended[0].data.content[0].text).toContain('[step summary]')
+    expect(appended[0].data.content[0].text).toContain('the step settled X')
+    expect(appended[0].data.source.kind).toBe('plugin')
+    // The summary REPLACES its step. Appending it instead puts a `user/message`
+    // at the head of every later turn, and the model answers that summary as if
+    // the user had just said it -- the reported symptom was the model repeating
+    // itself while the task scrolled away.
+    expect(appended[0].opts.surfaceOp.op).toBe('replace')
+    expect(typeof appended[0].opts.surfaceOp.startSeq).toBe('number')
+    expect(typeof appended[0].opts.surfaceOp.endSeq).toBe('number')
+    // Provenance is mandatory for a replace, and must cite the shadowed span.
+    expect(appended[0].opts.sourceEventSeqs).toContain(appended[0].opts.surfaceOp.startSeq)
+    expect(appended[0].opts.sourceEventSeqs).toContain(appended[0].opts.surfaceOp.endSeq)
+    expect(appended[0].data.summaryOf).toEqual({ turn: 1, step: 1 })
+  })
+
+  it('sends the projected context, not extracted material', async () => {
+    // The summarizer must see the conversation to relate the step to the task;
+    // a summary written from an isolated excerpt can only describe actions.
+    const session = completedSession()
+    const { preStep, calls } = mountWithLlm()
+    await preStep({ agent: { session }, turn: 2, step: 1 }, () => Promise.resolve({ kind: 'enter' }))
+    expect(calls).toHaveLength(1)
+    const messages = calls[0].messages
+    // system instruction, the context, then the one-line instruction
+    expect(messages.length).toBe(3)
+    expect(messages[0].content[0].text).toContain('current context of a working agent')
+    expect(messages.at(-1).content[0].text).toContain('Summarize the last step')
+  })
+
+  it('does nothing when a step is still in flight', async () => {
+    // A step with no step/end has no complete record to summarize.
+    const session = completedSession()
+    session.events = session.events.filter(event => event.type !== 'step/end')
+    const { preStep, calls } = mountWithLlm()
+    await preStep({ agent: { session }, turn: 1, step: 1 }, () => Promise.resolve({ kind: 'enter' }))
+    expect(calls).toHaveLength(0)
+    expect(session.appended).toHaveLength(0)
+  })
+
+  it('summarizes each step once, even across repeated pre-steps', async () => {
+    const session = completedSession()
+    const { preStep } = mountWithLlm()
+    for (let i = 0; i < 3; i += 1) {
+      await preStep({ agent: { session }, turn: 2, step: i + 1 }, () => Promise.resolve({ kind: 'enter' }))
+    }
+    expect(session.appended).toHaveLength(1)
+  })
+
+  it('does not summarize when the feature is off', async () => {
+    const session = completedSession()
+    const registered = []
+    const ctx = {
+      on: (event, handler) => registered.push([event, handler]),
+      systemPrompt: { section: () => {} },
+      inject: (_s, cb) => cb({ llm: { prepareCall: async () => ({ stream: () => chunks('x') }) } }),
+      logger: { info: vi.fn(), warn: vi.fn() },
+    }
+    apply(ctx, {})
+    await registered.find(([e]) => e === 'agent/pre-step')[1](
+      { agent: { session }, turn: 2, step: 1 }, () => Promise.resolve({ kind: 'enter' }),
+    )
+    expect(session.appended).toHaveLength(0)
+  })
+
+  it('never blocks the step when the provider fails', async () => {
+    // A summary improves the next step's context; it is never a precondition
+    // for it, so a failing provider must not stop the agent working.
+    const session = completedSession()
+    const registered = []
+    const ctx = {
+      on: (event, handler) => registered.push([event, handler]),
+      systemPrompt: { section: () => {} },
+      inject: (_s, cb) => cb({ llm: { prepareCall: async () => { throw new Error('rate limited') } } }),
+      logger: { info: vi.fn(), warn: vi.fn() },
+    }
+    apply(ctx, { stepSummary: true })
+    const decision = await registered.find(([e]) => e === 'agent/pre-step')[1](
+      { agent: { session }, turn: 2, step: 1 }, () => Promise.resolve({ kind: 'enter' }),
+    )
+    expect(decision).toEqual({ kind: 'enter' })
+    expect(ctx.logger.warn.mock.calls.flat().join('\n')).toContain('rate limited')
+  })
+})
+
+describe('summary message shape', () => {
+  it('reports summaries written to the log in the host event shape', () => {
+    // Regression: a summary event stores content FLAT on `data`, the way the
+    // host writes user messages. An earlier version nested it under `message`,
+    // wrote it successfully, and then could not read it back -- the report said
+    // zero summaries while the log held them.
+    seq_counter = 0
+    const events = [
+      ...log({ turn: 1, step: 1 }),
+      {
+        seq: 4,
+        type: 'user/message',
+        data: {
+          content: [{ type: 'text', text: '[step summary] the step settled X' }],
+          source: { kind: 'plugin', plugin: 'stepwise-distill' },
+          summaryOf: { turn: 1, step: 1 },
+        },
+      },
+    ]
+    const report = summarize(events, new Set(['1/1']))
+    expect(report.summaries).toHaveLength(1)
+    expect(report.summaries[0]).toContain('settled X')
+  })
+
+  it('does not mistake an ordinary user message for a summary', () => {
+    seq_counter = 0
+    const events = [
+      ...log({ turn: 1, step: 1 }),
+      { seq: 4, type: 'user/message', data: { content: [{ type: 'text', text: 'keep going' }] } },
+    ]
+    expect(summarize(events, undefined).summaries).toHaveLength(0)
+  })
+})
+
+describe('summary dispatch contract', () => {
+  /** Mount with an llm double that enforces the adapter's config check. */
+  function mountStrict() {
+    const seen = { prepared: null, dispatched: null }
+    const resolved = {
+      provider: 'deepseek-official',
+      model: 'deepseek-flash',
+      reasoningEffort: 'max',
+      maxTokens: 128000,
+    }
+    const llm = {
+      prepareCall: async () => ({
+        config: resolved,
+        stream: (options) => {
+          seen.dispatched = options
+          // The adapter's own rule: the resolved fields must arrive unchanged.
+          for (const key of ['provider', 'model', 'reasoningEffort', 'maxTokens']) {
+            if (options[key] !== resolved[key]) {
+              throw new Error(`prepared LLM call config changed before adapter dispatch (${key})`)
+            }
+          }
+          return (async function* () {
+            yield { type: 'block-start', index: 0, blockType: 'text' }
+            yield { type: 'text-delta', index: 0, text: 'settled X' }
+            yield { type: 'block-end', index: 0, block: { type: 'text', text: 'settled X' } }
+            yield { type: 'finish', reason: { kind: 'stop' } }
+          })()
+        },
+      }),
+    }
+    seen.prepared = resolved
+    const registered = []
+    const ctx = {
+      on: (event, handler) => registered.push([event, handler]),
+      systemPrompt: { section: () => {} },
+      inject: (_s, cb) => cb({ llm }),
+      logger: { info: vi.fn(), warn: vi.fn() },
+    }
+    apply(ctx, { stepSummary: true })
+    return { preStep: registered.find(([e]) => e === 'agent/pre-step')[1], seen, ctx }
+  }
+
+  function session() {
+    seq_counter = 0
+    const events = [
+      { seq: -1, type: 'request/header', data: { header: { config: { provider: 'deepseek-official', model: 'deepseek-flash' } } } },
+      ...log({ turn: 1, step: 1 }),
+    ]
+    return {
+      events,
+      appended: [],
+      deriveMessages: () => [{ role: 'assistant', content: [text('done')] }],
+      snapshotEvents: () => events,
+      options: { provider: 'deepseek-official', model: 'deepseek-flash' },
+      // `replace` addresses a span by surface seq, so the fixture needs one.
+      surface: { nodes: events.filter(e => e.type !== 'request/header').map(e => e.seq) },
+      // Mirrors the real Session.append contract: a surface-eligible event
+      // without a surfaceOp marker is rejected. Without this the fixture
+      // accepted appends the harness refuses, and the failure was invisible.
+      append(type, data, opts) {
+        if (type === 'user/message' && opts?.surfaceOp === undefined) {
+          throw new Error('session event "user/message" is surface-eligible and requires a surfaceOp marker')
+        }
+        this.appended.push({ type, data, opts })
+      },
+    }
+  }
+
+  it('dispatches with the config prepareCall resolved, not a partial one', async () => {
+    // Regression: spreading the caller's `{ provider, model }` into the request
+    // drops reasoningEffort/temperature/maxTokens, and the adapter refuses the
+    // dispatch with "prepared LLM call config changed". The call must carry
+    // `call.config` through unchanged.
+    const { preStep, seen } = mountStrict()
+    const target = session()
+    await preStep({ agent: { session: target }, turn: 2, step: 1 }, () => Promise.resolve({ kind: 'enter' }))
+    expect(seen.dispatched.reasoningEffort).toBe('max')
+    expect(seen.dispatched.maxTokens).toBe(128000)
+    expect(target.appended).toHaveLength(1)
+  })
+
+  it('sends the whole projected context plus one instruction', async () => {
+    const { preStep, seen } = mountStrict()
+    const target = session()
+    await preStep({ agent: { session: target }, turn: 2, step: 1 }, () => Promise.resolve({ kind: 'enter' }))
+    const messages = seen.dispatched.messages
+    expect(messages[0].content[0].text).toContain('current context of a working agent')
+    expect(messages.at(-1).content[0].text).toContain('Summarize the last step')
+  })
+})
+
+describe('summary request bounding', () => {
+  function bareSession() {
+    seq_counter = 0
+    const events = [
+      { seq: -1, type: 'request/header', data: { header: { config: { provider: 'p', model: 'm' } } } },
+      ...log({ turn: 1, step: 1 }),
+    ]
+    return {
+      events,
+      appended: [],
+      deriveMessages: () => [{ role: 'assistant', content: [text('done')] }],
+      snapshotEvents() { return this.events },
+      options: { provider: 'p', model: 'm' },
+      // Mirrors the real Session.append contract: a surface-eligible event
+      // without a surfaceOp marker is rejected. Without this the fixture
+      // accepted appends the harness refuses, and the failure was invisible.
+      append(type, data, opts) {
+        if (type === 'user/message' && opts?.surfaceOp === undefined) {
+          throw new Error('session event "user/message" is surface-eligible and requires a surfaceOp marker')
+        }
+        this.appended.push({ type, data, opts })
+      },
+    }
+  }
+
+  function mount(streamFactory) {
+    let calls = 0
+    const llm = {
+      prepareCall: async () => ({
+        config: { provider: 'p', model: 'm', reasoningEffort: 'off', maxTokens: 100 },
+        stream: () => { calls += 1; return streamFactory() },
+      }),
+    }
+    const registered = []
+    apply({
+      on: (e, h) => registered.push([e, h]),
+      systemPrompt: { section: () => {} },
+      inject: (_s, cb) => cb({ llm }),
+      logger: { info: () => {}, warn: vi.fn() },
+    }, { stepSummary: true })
+    return { preStep: registered.find(([e]) => e === 'agent/pre-step')[1], calls: () => calls }
+  }
+
+  it('asks at most once when the provider keeps answering with nothing', async () => {
+    // Regression: marking the step only AFTER a summary arrived made an empty
+    // reply a loop. Every pre-step found the same unfinished step and asked
+    // again -- a measured run issued 32 identical requests, one every seven
+    // seconds, and never stopped.
+    const empty = async function* () {
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: '' } }
+    }
+    const { preStep, calls } = mount(empty)
+    const session = bareSession()
+    for (let i = 0; i < 5; i += 1) {
+      await preStep({ agent: { session }, turn: 2, step: i + 1 }, () => Promise.resolve({ kind: 'enter' }))
+    }
+    expect(calls()).toBe(1)
+    expect(session.appended).toHaveLength(0)
+  })
+
+  it('keeps the raw step visible when its summary came back empty', async () => {
+    // A claimed step with no summary must NOT be dropped from the projection:
+    // there is no replacement for its material, so hiding it would silently
+    // delete the step from the conversation.
+    const empty = async function* () {
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: '' } }
+    }
+    const { preStep } = mount(empty)
+    const session = bareSession()
+    await preStep({ agent: { session }, turn: 2, step: 1 }, () => Promise.resolve({ kind: 'enter' }))
+    // deriveMessages is wrapped by the projection installer; with no summary
+    // written, the wrapper must pass the messages through untouched.
+    const projected = session.deriveMessages()
+    expect(projected).toHaveLength(1)
+    expect(JSON.stringify(projected)).toContain('done')
   })
 })
