@@ -20,7 +20,8 @@ returns any of it by seq.
 
 ## Why, exactly
 
-The goal is not a smaller bill. It is that an agent asked to do something can
+The goal is not a smaller bill -- this plugin spends tokens and time, see
+[What it costs](#what-it-costs). It is that an agent asked to do something can
 still find that request in its own context an hour later.
 
 Measured across sessions, an assistant's own output breaks down roughly as:
@@ -78,6 +79,37 @@ matters in a step is a judgement about intent, and a pattern cannot make it.
 Once a step has been written down, its messages stop being projected. Earlier records
 plus the newest step is all the next request carries. The log keeps everything.
 
+## What it costs
+
+This is a trade, not a discount: it spends tokens and wall-clock time to keep a
+long conversation readable.
+
+**`reasoningContract: true` (on by default) puts a fixed section in the system
+prompt of every request.** The section is about 770 characters (roughly 200
+tokens) on every request of every turn, for the whole life of the session. It is
+a constant overhead, not a one-off. Set it to `false` to stop paying it.
+
+**`stepSummary: true` (off by default) sends one extra request per step, and
+that request carries the whole current context.** It is not a digest of the
+step: the request is the summary system prompt, plus the full projected
+context, plus a short instruction. So its input cost is on the order of the
+request you were about to send anyway -- roughly twice the input tokens for
+that step, plus the record it writes.
+
+**It also makes every step slower.** The summary goes out before the next
+request is built, because deciding what that request contains is its whole
+purpose. Each step therefore waits for two model round-trips instead of one,
+which on a long task is a visible increase in total task time.
+
+With `stepSummary: false` no extra request is made at all, and `debug: false`
+(the default) returns before it touches the log file. Nothing is deleted or
+rewritten in either case: what changes is only what the model is shown.
+
+The saving grows with conversation length while these costs stay flat, so the
+crossover is a long session. On a single short task, expect more tokens and more
+time than without the plugin. Turn `stepSummary` on when replay has become the
+problem, not before.
+
 ## Configuration
 
 ```yaml
@@ -88,8 +120,9 @@ plus the newest step is all the next request carries. The log keeps everything.
     debug: false
 ```
 
-`stepSummary` is off by default because it spends one request per step. Turn it
-on when the conversation is long enough that replayed material is the problem.
+`stepSummary` is off by default because of what it costs -- one extra request
+per step, carrying the whole current context, plus one more model round-trip
+before the next step can start. See [What it costs](#what-it-costs).
 
 ## Install
 

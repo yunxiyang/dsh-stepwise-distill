@@ -1,7 +1,7 @@
 {
   "name": "dsh-stepwise-distill",
   "version": "0.2.0",
-  "description": "Solidify DSH session history step by step: rewrite tool results in place to the facts the model actually kept, so long conversations stop re-sending noise every turn.",
+  "description": "Solidify DSH session history step by step: rewrite tool results in place to the facts the model actually kept, so long conversations stop re-sending noise every turn. Costs tokens and time: a ~770-character contract in every request, plus one extra full-context request and round-trip per step when stepSummary is on.",
   "keywords": [
     "dsh",
     "dsh-plugin",

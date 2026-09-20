@@ -13,6 +13,11 @@
   entirely on tool results.
 - Number the system-prompt contract as the last piece of operating guidance,
   after the harness-source and web-surface notes.
+- Document what the plugin costs in `README.md`: the system-prompt contract is
+  about 770 characters on every request, and `stepSummary` adds one request per
+  step that carries the whole current context and waits for its own round-trip.
+  The saving grows with conversation length while these costs stay flat, so a
+  single short task spends more than it saves.
 
 ## 0.1.0
 
