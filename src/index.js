@@ -85,6 +85,30 @@ export const UNKNOWN_TOOL = '<unknown>'
  * Stored on the session rather than in module scope because sessions outlive
  * plugin mounts: a resume, a reload, or a second mount must not wrap twice.
  */
+/**
+ * Append one diagnostic line to the plugin's own log file.
+ *
+ * The plugin's work is invisible from outside the harness: a retained note is an
+ * ordinary session event, and a failure is deliberately non-fatal. That made two
+ * separate outages look identical from the outside -- "the request went out and
+ * nothing changed". File-based so a running process can be inspected without a
+ * restart, and gated on `debug` so it costs nothing when off.
+ *
+ * @param enabled - whether diagnostics are on.
+ * @param line - the message to record.
+ */
+function diagnose(enabled, line) {
+  if (!enabled) return
+  try {
+    const fs = globalThis.process?.getBuiltinModule?.('node:fs')
+    if (fs === undefined) return
+    fs.appendFileSync(
+      '/tmp/dsh-stepwise-distill.log',
+      `${new Date().toISOString()} ${line}\n`,
+    )
+  } catch {}
+}
+
 export const REASONING_STRIPPED = Symbol.for('dsh-stepwise-distill.reasoningStripped')
 
 /** Non-enumerable marker recording which `turn/step` pairs have a summary. */
@@ -160,7 +184,7 @@ export function readEvents(session) {
   return []
 }
 
-export function summarize(events, summarized) {
+export function summarize(events) {
   const steps = new Set()
   for (const event of events) {
     const turn = event?.data?.turn
@@ -204,7 +228,19 @@ export function summarize(events, summarized) {
     }
   }
 
-  return { steps: steps.size, summarized: summarized?.size ?? 0, summaries, droppedBytes, droppedPieces }
+  // `summarized` is counted from the log, not taken from the caller.
+  //
+  // It used to be the caller's set size, and `/distill` called this with one
+  // argument -- so the command reported "steps summarized: 0" on a session that
+  // had six records in it. The log is the only source that cannot go out of
+  // step with what was actually written.
+  return {
+    steps: steps.size,
+    summarized: summaries.length,
+    summaries,
+    droppedBytes,
+    droppedPieces,
+  }
 }
 
 /**
@@ -218,14 +254,20 @@ export function renderSummary(report, config) {
     `step summary: ${config.stepSummary ? 'on' : 'off'}`,
     `reasoning stripped from the request: ${config.reasoningContract ? 'yes' : 'no'}`,
     `steps in this session: ${report.steps}`,
-    `steps summarized: ${report.summarized}`,
+    `steps written down: ${report.summarized}`,
   ]
   if (report.summarized > 0) {
     lines.push(`raw material withheld from later turns: ${report.droppedBytes} bytes `
       + `in ${report.droppedPieces} pieces`)
+    const newest = report.summaries.at(-1)
+    if (typeof newest === 'string') {
+      lines.push('')
+      lines.push('Most recent record:')
+      lines.push(`  ${newest.split('\n')[0].slice(0, 160)}`)
+    }
   } else {
     lines.push('')
-    lines.push('No step has been summarized yet. Summaries are written after a step')
+    lines.push('No step has been written down yet. A record is written after a step')
     lines.push('completes; until then every step is still sent in full.')
   }
   lines.push('Original text is never lost: `history_read` returns any seq.')
@@ -387,6 +429,8 @@ export function apply(ctx, config) {
     // decision, so the chain must always be resumed. Solidification is a side
     // effect around it, never a replacement for it.
     const current = resolveConfig(config)
+    diagnose(current.debug, `pre-step turn=${turn} step=${step} `
+      + `stepSummary=${String(current.stepSummary)} llm=${String(llm !== undefined)}`)
     installReasoningStrip(agent, current)
     // Summarize the step that just ended BEFORE the next request is built: the
     // point of the summary is to decide what that request contains. Failure is
@@ -397,6 +441,7 @@ export function apply(ctx, config) {
         await summarizeFinishedStep(agent, llm, current, signal)
       } catch (error) {
         const message = String(error?.stack ?? error)
+        diagnose(current.debug, `FAILED ${message.split('\n')[0]}`)
         ctx.logger?.warn?.(`[${name}] step summary failed: ${message}`)
         // A summary failure is deliberately non-fatal, and the warn above is
         // not readable from outside the harness -- which together made every
@@ -650,22 +695,23 @@ async function requestSummary(llm, config, messages, signal) {
  */
 async function summarizeFinishedStep(agent, llm, config, signal) {
   const session = agent?.session
-  if (session === undefined || llm === undefined) return
-  if (typeof session.deriveMessages !== 'function') return
+  const log = line => diagnose(config.debug, line)
+  if (session === undefined || llm === undefined) return log('skip: no session or no llm')
+  if (typeof session.deriveMessages !== 'function') return log('skip: no deriveMessages')
 
   const events = readEvents(session)
   let target
   for (const event of events) {
     if (event.type === 'step/end') target = event.data
   }
-  if (target === undefined) return
+  if (target === undefined) return log('skip: no step/end in log')
 
   const key = `${target.turn}/${target.step}`
   const route = routeOf(events, agent)
-  if (route === undefined) return
+  if (route === undefined) return log(`skip ${key}: no route`)
 
   const context = session.deriveMessages()
-  if (!Array.isArray(context) || context.length === 0) return
+  if (!Array.isArray(context) || context.length === 0) return log(`skip ${key}: empty context`)
 
   // Claim the step BEFORE spending a request on it.
   //
@@ -675,12 +721,13 @@ async function summarizeFinishedStep(agent, llm, config, signal) {
   // every seven seconds, and never stopped. The claim is per (turn, step) and
   // per session, so a step is asked about at most once.
   const claimed = session[SUMMARIZED_STEPS] ?? new Set()
-  if (claimed.has(key)) return
+  if (claimed.has(key)) return log(`skip ${key}: already claimed`)
   claimed.add(key)
   Object.defineProperty(session, SUMMARIZED_STEPS, { value: claimed, enumerable: false })
 
   const summary = await requestSummary(llm, route, context, signal)
-  if (summary.length === 0) return
+  if (summary.length === 0) return log(`skip ${key}: empty reply (context=${context.length})`)
+  log(`got ${key}: ${summary.length} chars, context=${context.length}`)
 
   // The summary REPLACES its step on the surface. It is not appended: an
   // appended `user/message` lands at the head of every later turn, so the model
@@ -708,15 +755,19 @@ async function summarizeFinishedStep(agent, llm, config, signal) {
     summaryOf: { turn: target.turn, step: target.step },
   }
   if (range === undefined) {
-    // No addressable span (a step whose events are already off the surface):
-    // appending would repeat the mistake, so the summary is simply dropped and
-    // the step's material is left alone.
-    return
+    // No addressable span. Either the step's events are already off the
+    // surface, or an input node (the task, a plugin note) sits between the
+    // material it produced. Appending instead would put a `user/message` at the
+    // head of every later turn, so the record is dropped and the step's material
+    // is left alone -- visible in the diagnostic log rather than silent.
+    return log(`skip ${key}: no addressable span`)
   }
   await session.append('user/message', message, {
     surfaceOp: { op: 'replace', startSeq: range.startSeq, endSeq: range.endSeq },
     sourceEventSeqs: range.seqs,
   })
+  log(`wrote ${key}: replaced ${range.startSeq}-${range.endSeq} `
+    + `(${range.seqs.length} nodes) with ${summary.length} chars`)
 }
 
 

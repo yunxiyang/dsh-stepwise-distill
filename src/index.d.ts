@@ -68,14 +68,15 @@ export declare function readEvents(session: unknown): readonly unknown[]
 /** One `/distill` report. */
 export interface DistillReport {
   steps: number
+  /** Records found in the log. Counted from the log, never from a caller. */
   summarized: number
   summaries: string[]
   droppedBytes: number
   droppedPieces: number
 }
 
-/** Summarize what the plugin is holding back from later turns. */
-export declare function summarize(events: readonly unknown[], summarized: Set<string> | undefined): DistillReport
+/** Report what the plugin is holding back from later turns, read from the log. */
+export declare function summarize(events: readonly unknown[]): DistillReport
 
 /** Render a report as the text a `/distill` invocation shows. */
 export declare function renderSummary(report: DistillReport, config: ResolvedConfig): string

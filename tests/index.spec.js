@@ -49,6 +49,25 @@ function log({ turn = 1, step = 1, body = 'body' } = {}) {
 }
 let seq_counter = 0
 
+/**
+ * One retention record as the plugin writes it.
+ *
+ * The content sits flat on `data`, which is what distinguishes it from the
+ * host-built messages that nest theirs under `message`.
+ */
+function record(key) {
+  const [turn, step] = key.split('/').map(Number)
+  return {
+    seq: 500 + (seq_counter += 1),
+    type: 'user/message',
+    data: {
+      content: [{ type: 'text', text: `[step summary] what step ${key} established` }],
+      source: { kind: 'plugin', plugin: 'stepwise-distill' },
+      summaryOf: { turn, step },
+    },
+  }
+}
+
 const CONFIG = resolveConfig({})
 
 describe('config', () => {
@@ -172,27 +191,54 @@ describe('mounting', () => {
 })
 
 describe('summarize report', () => {
-  it('counts steps and the material a summary withholds', () => {
+  it('counts the records written to the log, not a caller-supplied tally', () => {
+    // The count comes from the log. It used to come from a second argument, and
+    // `/distill` called this with one -- so the command reported "steps
+    // summarized: 0" on a session that had six records in it.
     seq_counter = 0
-    const events = [...log({ turn: 1, step: 1 }), ...log({ turn: 1, step: 2 })]
-    const report = summarize(events, new Set(['1/1']))
+    const events = [
+      ...log({ turn: 1, step: 1 }),
+      ...log({ turn: 1, step: 2 }),
+      record('1/1'),
+      record('1/2'),
+    ]
+    const report = summarize(events)
     expect(report.steps).toBe(2)
-    expect(report.summarized).toBe(1)
-    // Reasoning, reply text, tool arguments and tool output are all material
-    // the projection stops re-sending once a step is summarized.
+    expect(report.summarized).toBe(2)
+  })
+
+  it('counts only records, not ordinary user messages', () => {
+    seq_counter = 0
+    const events = [...log({ turn: 1, step: 1 }), record('1/1')]
+    events.push({
+      seq: 900, type: 'user/message', time: 1, data: {
+        content: [{ type: 'text', text: 'an ordinary thing the user said' }],
+        source: { kind: 'user' },
+      },
+    })
+    expect(summarize(events).summarized).toBe(1)
+  })
+
+  it('reports nothing withheld before any step is written down', () => {
+    seq_counter = 0
+    const report = summarize(log())
+    expect(report.summarized).toBe(0)
+    expect(report.summaries).toHaveLength(0)
+  })
+
+  it('tolerates a session with no events at all', () => {
+    expect(() => summarize([])).not.toThrow()
+    expect(summarize([]).summarized).toBe(0)
+  })
+
+  it('still accounts for the material a record withholds', () => {
+    seq_counter = 0
+    const events = [...log({ turn: 1, step: 1 }), record('1/1')]
+    const report = summarize(events)
+    // Reasoning, tool arguments and tool output are all material the projection
+    // stops re-sending once a step has a record.
     expect(report.droppedPieces).toBeGreaterThan(0)
     expect(report.droppedBytes).toBeGreaterThan(0)
-  })
-
-  it('reports nothing withheld before any step is summarized', () => {
-    seq_counter = 0
-    const report = summarize(log(), new Set())
-    expect(report.summarized).toBe(0)
-  })
-
-  it('tolerates a session with no summarization state yet', () => {
-    seq_counter = 0
-    expect(() => summarize(log(), undefined)).not.toThrow()
   })
 })
 
@@ -507,7 +553,7 @@ describe('summary message shape', () => {
         },
       },
     ]
-    const report = summarize(events, new Set(['1/1']))
+    const report = summarize(events)
     expect(report.summaries).toHaveLength(1)
     expect(report.summaries[0]).toContain('settled X')
   })
@@ -518,7 +564,7 @@ describe('summary message shape', () => {
       ...log({ turn: 1, step: 1 }),
       { seq: 4, type: 'user/message', data: { content: [{ type: 'text', text: 'keep going' }] } },
     ]
-    expect(summarize(events, undefined).summaries).toHaveLength(0)
+    expect(summarize(events).summaries).toHaveLength(0)
   })
 })
 
