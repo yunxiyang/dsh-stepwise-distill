@@ -7,6 +7,7 @@ import {
   resolveConfig,
   summarize,
 } from '../src/index.js'
+import { restoreNewestStep } from '../src/distill.js'
 
 const text = value => ({ type: 'text', text: value })
 const reasoning = value => ({ type: 'reasoning', text: value })
@@ -565,6 +566,44 @@ describe('summary message shape', () => {
       { seq: 4, type: 'user/message', data: { content: [{ type: 'text', text: 'keep going' }] } },
     ]
     expect(summarize(events).summaries).toHaveLength(0)
+  })
+})
+
+describe('newest step keeps its evidence', () => {
+  it('projects the newest step as material plus record, older ones as records', () => {
+    // The record says what a step concluded. For the step being reasoned about
+    // now that is not enough to act on: a measured run answered by reading the
+    // same file again after each record that replaced a read of it. The newest
+    // step therefore keeps both.
+    const raw = { id: 'raw-3', role: 'user', content: [{ type: 'text', text: 'tool output for step 3' }] }
+    const recordMessage = { id: 'rec-3', role: 'user', content: [{ type: 'text', text: '[step summary] step 3 said X' }] }
+    const messages = [
+      { id: 'rec-1', role: 'user', content: [{ type: 'text', text: '[step summary] step 1 said A' }] },
+      { id: 'rec-2', role: 'user', content: [{ type: 'text', text: '[step summary] step 2 said B' }] },
+      recordMessage,
+    ]
+    const records = [
+      { message: { id: 'rec-1' }, rawSeqs: [10] },
+      { message: { id: 'rec-2' }, rawSeqs: [20] },
+      { message: recordMessage, rawSeqs: [31, 33] },
+    ]
+    const bySeq = new Map([[10, [{ id: 'raw-1' }]], [20, [{ id: 'raw-2' }]], [31, [raw]], [33, [{ id: 'raw-3b' }]]])
+    const out = restoreNewestStep(messages, records, seq => bySeq.get(seq))
+    expect(out.map(m => m.id)).toEqual(['rec-1', 'rec-2', 'rec-3', 'raw-3', 'raw-3b'])
+  })
+
+  it('leaves the projection alone when the newest step has no material', () => {
+    const recordMessage = { id: 'rec-9', role: 'user', content: [{ type: 'text', text: '[step summary] x' }] }
+    const messages = [recordMessage]
+    const out = restoreNewestStep(messages, [{ message: recordMessage, rawSeqs: [] }], () => undefined)
+    expect(out).toBe(messages)
+  })
+
+  it('does not duplicate the material when the record is absent from the list', () => {
+    const raw = { id: 'raw-3' }
+    const messages = [{ id: 'rec-1' }]
+    const out = restoreNewestStep(messages, [{ message: { id: 'gone' }, rawSeqs: [31] }], () => [raw])
+    expect(out).toBe(messages)
   })
 })
 

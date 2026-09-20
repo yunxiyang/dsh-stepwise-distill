@@ -313,3 +313,46 @@ export function dropSummarizedSteps(messages, summarized, stepOf) {
   }
   return changed ? out : messages
 }
+
+/**
+ * Put the newest step's raw material back into the projected list.
+ *
+ * A step's material is replaced on the log when its record is written, so the
+ * projection carries records only. That reads well for steps the agent has
+ * finished reasoning about, and badly for the one it is reasoning about now:
+ * the record says what the step concluded, and the agent has no way to check
+ * the conclusion against what it actually ran. A measured run responded by
+ * reading the same file four times, once after each record that replaced a
+ * read of it.
+ *
+ * So the newest step is projected as its raw messages PLUS its record. The
+ * step being reasoned about keeps its evidence; every earlier step keeps its
+ * conclusion. As the session advances the window moves: what was newest is
+ * then an earlier step, and the next projection shows its record alone.
+ *
+ * @param messages - the projected message list, records included.
+ * @param records - `{ key, message, rawSeqs }` per record, oldest first.
+ * @param messagesOfSeq - maps a surface seq to the messages it contributes.
+ * @returns a list with the newest step's material restored after its record.
+ */
+export function restoreNewestStep(messages, records, messagesOfSeq) {
+  if (!Array.isArray(messages) || records.length === 0) return messages
+  const newest = records[records.length - 1]
+  const restored = []
+  for (const seq of newest.rawSeqs ?? []) {
+    for (const message of messagesOfSeq(seq) ?? []) restored.push(message)
+  }
+  if (restored.length === 0) return messages
+
+  const out = []
+  let placed = false
+  for (const message of messages) {
+    out.push(message)
+    if (placed || message?.id !== newest.message?.id) continue
+    // The record first, then what it recorded: the record orients the reader,
+    // the material lets them verify it.
+    for (const raw of restored) out.push(raw)
+    placed = true
+  }
+  return placed ? out : messages
+}

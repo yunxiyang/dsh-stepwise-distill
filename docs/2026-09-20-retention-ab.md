@@ -1,28 +1,32 @@
 # Retention on/off comparison, 2026-09-20
 
-Same model, same task, same machine; two isolated profiles differing only in
-`stepSummary`.
+Same model, same task, same machine; isolated profiles differing only in how the
+newest step is projected.
 
 Task: fix `calc.py` so `python3 -m unittest -v` passes, then run the tests.
 
-| | tool calls | repeated | task result |
+| projection | tool calls | repeated | task result |
 |---|---:|---:|---|
-| off | 4 | 0 | tests pass |
-| on  | 10 | 4 | tests pass |
+| retention off | 4 | 0 | tests pass |
+| newest step: record only | 10 | 4 | tests pass |
+| newest step: material + record | 4 | 0 | tests pass |
 
-The `on` run reads `calc.py` at steps 1, 2, 4 and 6. Each read follows a step
-whose tool result was replaced by a record of that step.
+Model: `litellm-gpt/openai/gpt-6-astra`.
 
-Model: `litellm-gpt/openai/gpt-6-astra`, the route this machine currently runs.
+## Reading
 
-## What this establishes
+Replacing a step's material with a record of it costs the agent its evidence.
+A record states what a step concluded; it is not something the agent can check a
+conclusion against. The `record only` run read `calc.py` at steps 1, 2, 4 and 6,
+each read following a step whose result had just been replaced.
 
-Replacing tool results makes the agent re-read the files it already read. A
-record is the model's account of a read; the result is the read. The agent
-cannot treat the account as evidence that it holds the file's contents, so it
-reads again.
+Projecting the newest step as its material plus its record removes that: the
+step being reasoned about keeps its evidence, earlier steps keep their
+conclusions, and the window advances on its own as the session progresses.
 
-## What it does not establish
+## Scope
 
-Whether a finer-grained replacement avoids the re-reading. The tool result is
-the obvious candidate to keep while compressing what surrounds it.
+One task, one model, three runs. The measurement is tool-call count and repeated
+arguments, not a judgement of the final answer. `record only` and `material +
+record` both produced a working fix; what differs is how much work the agent did
+to get there.
