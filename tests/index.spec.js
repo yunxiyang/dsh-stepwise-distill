@@ -477,7 +477,7 @@ describe('summarize installation', () => {
     // system instruction, the context, then the one-line instruction
     expect(messages.length).toBe(3)
     expect(messages[0].content[0].text).toContain('current context of a working agent')
-    expect(messages.at(-1).content[0].text).toContain('Summarize the last step')
+    expect(messages.at(-1).content[0].text).toContain('Read the newest record in the transcript above')
   })
 
   it('does nothing when a step is still in flight', async () => {
@@ -762,7 +762,7 @@ describe('summary dispatch contract', () => {
     await preStep({ agent: { session: target }, turn: 2, step: 1 }, () => Promise.resolve({ kind: 'enter' }))
     const messages = seen.dispatched.messages
     expect(messages[0].content[0].text).toContain('current context of a working agent')
-    expect(messages.at(-1).content[0].text).toContain('Summarize the last step')
+    expect(messages.at(-1).content[0].text).toContain('Read the newest record in the transcript above')
   })
 })
 

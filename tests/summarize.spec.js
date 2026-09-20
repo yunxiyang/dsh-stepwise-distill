@@ -23,7 +23,7 @@ describe('summary prompt', () => {
     // the agent lost the thread and re-asked what it had already answered.
     expect(flat).toContain('the only record of that step')
     expect(flat).toContain('complete account of what happened')
-    expect(flat).toContain('Length follows the step')
+    expect(flat).toContain('Length follows what the step moved forward')
     expect(flat).not.toContain('1-3 sentences')
   })
 
@@ -41,13 +41,13 @@ describe('summary prompt', () => {
   })
 
   it('scopes the answer to the last step only', () => {
-    expect(flat).toContain('Describe only the LAST step')
+    expect(flat).toContain('If this step continues what that record described')
   })
 
   it('keeps the reasoning out', () => {
     // Restating the thinking recreates, one level up, the churn this exists to
     // remove -- so what to leave out is as load-bearing as what to keep.
-    expect(flat).toContain('do not restate the thinking')
+    expect(flat).toContain("the step's outcome, and it belongs in the record")
     expect(flat).toContain('the order things were looked at')
     expect(flat).toContain('Do not restate the task')
   })
