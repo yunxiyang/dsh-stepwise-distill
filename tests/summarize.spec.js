@@ -184,6 +184,18 @@ describe('turn records', () => {
     // The self-check is what makes the gate mechanical rather than aspirational.
     expect(flat).toContain('换一个完全不同的任务')
   })
+
+  it('tells the turn record not to rewrite a rule that is already there', () => {
+    // Four consecutive records in a real session (`ae907c57`, turns 199-203)
+    // restated the same handful of standing rules -- MSRV, how to capture an
+    // exit code, checking which process owns a port. The cross-task gate alone
+    // makes that worse, not better: a rule that never expires satisfies it
+    // every turn, so "worth keeping" was never the same question as "already
+    // written down". The gate now asks both.
+    const flat = turnPrompt()
+    expect(flat).toContain('已经写过的')
+    expect(flat).toContain('没有新的东西')
+  })
 })
 
 describe('dropping summarized material', () => {
