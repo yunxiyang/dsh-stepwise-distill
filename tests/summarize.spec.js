@@ -172,6 +172,18 @@ describe('turn records', () => {
     expect(flat).not.toContain('这是读者今后唯一会再看到的关于这一步的记录')
     expect(turnInstruction()).not.toContain('最后一步')
   })
+
+  it('asks for what outlives the task, not for what the turn did', () => {
+    // A real record written before this gate was added spent most of its length
+    // on how one specific thing was checked -- the exact cursor timestamps that
+    // told the new binary from the old one. Useful that afternoon, worthless on
+    // the next task, and it crowded out the two lines that did generalise.
+    // "What did this turn learn" invites that; the gate has to be stated.
+    const flat = turnPrompt()
+    expect(flat).toContain('跨任务')
+    // The self-check is what makes the gate mechanical rather than aspirational.
+    expect(flat).toContain('换一个完全不同的任务')
+  })
 })
 
 describe('dropping summarized material', () => {
