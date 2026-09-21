@@ -22,11 +22,16 @@ import z from '@deepseek-ai/schemastery'
 import { BlockAssembler, createSystemMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
 import {
   SUMMARY_MARKER,
+  TURN_MARKER,
+  isNoTurnSummary,
   parseSummary,
   renderStepMaterial,
   renderSummaryMessage,
+  renderTurnMessage,
   summarizeInstruction,
   summarizePrompt,
+  turnInstruction,
+  turnPrompt,
 } from './summarize.js'
 import { deriveEventMessage } from '@deepseek-ai/dsh-session'
 import { defineTool } from '@deepseek-ai/dsh-tools'
@@ -114,6 +119,15 @@ export const REASONING_STRIPPED = Symbol.for('dsh-stepwise-distill.reasoningStri
 export const SUMMARIZED_STEPS = Symbol.for('dsh-stepwise-distill.summarizedSteps')
 
 /**
+ * Non-enumerable marker recording which turns have a turn-level record.
+ *
+ * Separate from {@link SUMMARIZED_STEPS}: a turn record is an addition that
+ * replaces nothing, so it must never be consulted when deciding whether a step
+ * still needs its material.
+ */
+export const SUMMARIZED_TURNS = Symbol.for('dsh-stepwise-distill.summarizedTurns')
+
+/**
  * The last summary failure, readable from `/distill`.
  *
  * A summary failure never stops a step, so nothing else surfaces it. Without a
@@ -142,6 +156,8 @@ export const Config = z.object({
   reasoningContract: z.boolean().default(true),
   /** Ask the model for a step summary and keep its raw material out of later turns. */
   stepSummary: z.boolean().default(false),
+  /** Ask the model what a finished turn added, and append that record to it. */
+  turnSummary: z.boolean().default(false),
   /** Emit a diagnostic line for every evaluation. */
   debug: z.boolean().default(false),
 })
@@ -161,6 +177,9 @@ export function resolveConfig(config) {
     // step whose conclusion was never written down cannot be kept at all.
     reasoningContract: config?.reasoningContract ?? true,
     stepSummary: config?.stepSummary ?? false,
+    // Off by default: a turn record is an addition, and a session that has not
+    // asked for one should not grow a second kind of entry.
+    turnSummary: config?.turnSummary ?? false,
     debug: config?.debug ?? false,
   }
 }
@@ -455,6 +474,27 @@ export function apply(ctx, config) {
   if (typeof ctx.inject === 'function') {
     ctx.inject(optionalInject, (injected) => {
       llm = injected?.llm
+      // Registered here, not beside the step hook: the turn record needs `llm`,
+      // and `llm` only exists once `inject` has resolved.
+      //
+      // `agent/turn-stopping` fires before `turn/end`, while the turn is still
+      // open, so an append made here is visible to the next turn and cannot
+      // reopen this one. The signal it carries marks a turn the user cancelled
+      // -- a turn that merely finished keeps its signal live, so a request made
+      // here is not cut short by the turn ending.
+      listen('agent/turn-stopping', async ({ agent, turn, signal }) => {
+        const current = resolveConfig(config)
+        diagnose(current.debug, `turn-stopping turn=${turn} `
+          + `turnSummary=${String(current.turnSummary)} llm=${String(llm !== undefined)}`)
+        if (!current.turnSummary || llm === undefined) return
+        try {
+          await summarizeFinishedTurn(agent, llm, current, signal)
+        } catch (error) {
+          const message = String(error?.stack ?? error)
+          diagnose(current.debug, `FAILED turn: ${message.split('\n')[0]}`)
+          ctx.logger?.warn?.(`[${name}] turn summary failed: ${message}`)
+        }
+      })
       if (injected?.commands !== undefined) {
         try {
           registerCommand(injected.commands)
@@ -815,6 +855,112 @@ async function summarizeFinishedStep(agent, llm, config, signal) {
   })
   log(`wrote ${key}: replaced ${range.startSeq}-${range.endSeq} `
     + `(${range.seqs.length} nodes) with ${summary.length} chars`)
+}
+
+/**
+ * Write down what a finished turn added beyond the step records.
+ *
+ * The step records say what each step did and replace the material they cover.
+ * They do not say what the turn as a whole taught the reader: how the user
+ * wants things done, what the user explained, and whether the turn arrived at a
+ * way of working worth keeping. Those are additions, not replacements -- the
+ * records they sit next to stay exactly as they are.
+ *
+ * Runs on the turn's last step, before `turn/end`, so the record is visible to
+ * the next turn and never reopens this one.
+ *
+ * @param agent - the running agent.
+ * @param llm - the injected llm service.
+ * @param config - resolved plugin config.
+ * @param signal - abort signal from the running turn.
+ * @returns a promise resolving when the attempt is done; never rejects.
+ */
+async function summarizeFinishedTurn(agent, llm, config, signal) {
+  const session = agent?.session
+  const log = line => diagnose(config.debug, line)
+  if (session === undefined || llm === undefined) return log('skip turn: no session or no llm')
+  if (typeof session.deriveMessages !== 'function') return log('skip turn: no deriveMessages')
+
+  const events = readEvents(session)
+  let turn
+  for (const event of events) {
+    if (event.type === 'turn/start') turn = event.data?.turn
+  }
+  if (typeof turn !== 'number') return log('skip turn: no turn/start in log')
+
+  const route = routeOf(events, agent)
+  if (route === undefined) return log(`skip turn ${turn}: no route`)
+
+  const context = session.deriveMessages()
+  if (!Array.isArray(context) || context.length === 0) {
+    return log(`skip turn ${turn}: empty context`)
+  }
+
+  // Claimed before the request, for the same reason the step key is: an empty
+  // reply would otherwise be retried by every later hook of the same turn.
+  const claimed = session[SUMMARIZED_TURNS] ?? new Set()
+  if (claimed.has(turn)) return log(`skip turn ${turn}: already claimed`)
+  claimed.add(turn)
+  Object.defineProperty(session, SUMMARIZED_TURNS, { value: claimed, enumerable: false })
+
+  const summary = await requestTurnSummary(llm, route, context, signal)
+  if (summary.length === 0) {
+    return log(`skip turn ${turn}: empty reply (context=${context.length})`)
+  }
+  if (isNoTurnSummary(summary)) {
+    log(`turn ${turn}: nothing worth writing down`)
+    return
+  }
+  log(`got turn ${turn}: ${summary.length} chars, context=${context.length}`)
+
+  // Appended, not replaced. `"append"` is the string form and is legal: the
+  // host returns early on it before the object checks, which is why its own
+  // loop appends with `{ surfaceOp: "append" }` and only `replace` takes an
+  // object.
+  //
+  // A `user/message` rather than an `assistant/message`: the latter is built
+  // by `createAssistantMessage`, which marks the source as `model`, and the
+  // next turn would read the record as something it had said itself.
+  await session.append('user/message', {
+    ...createUserMessage({
+      content: [{ type: 'text', text: renderTurnMessage(summary) }],
+      source: { kind: 'plugin', plugin: name },
+    }),
+    summaryOfTurn: turn,
+  }, { surfaceOp: 'append' })
+  log(`wrote turn ${turn}: appended ${summary.length} chars`)
+}
+
+/**
+ * Ask the model what a finished turn added.
+ *
+ * Separate from {@link requestSummary} in the prompt it sends and in nothing
+ * else: the transport details are the same, and each was found the hard way.
+ *
+ * @param llm - the injected llm service.
+ * @param config - `{ provider, model }`, matching the session's own route.
+ * @param messages - the context, as it would be sent.
+ * @param signal - abort signal from the running turn.
+ * @returns the summary text, or `''` when none was produced.
+ */
+async function requestTurnSummary(llm, config, messages, signal) {
+  const request = [
+    createSystemMessage(turnPrompt(), name),
+    ...messages,
+    createUserMessage({ content: [{ type: 'text', text: turnInstruction() }] }),
+  ]
+  const route = { provider: config.provider, model: config.model }
+  let call
+  try {
+    call = await llm.prepareCall({ ...route, reasoningEffort: 'off' }, signal)
+  } catch (error) {
+    if (error?.code !== 'UNSUPPORTED_REASONING_EFFORT') throw error
+    call = await llm.prepareCall(route, signal)
+  }
+  const stream = call.stream({ ...call.config, messages: request, signal })
+  const assembler = new BlockAssembler()
+  for await (const chunk of stream) assembler.push(chunk)
+  return parseSummary(assembler.blocks())
 }
 
 

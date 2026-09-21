@@ -75,12 +75,12 @@ describe('config', () => {
   it('defaults to the conclusion contract on and step summary off', () => {
     // Summary is off by default because it spends a request per step; the
     // conclusion contract costs nothing and is on.
-    expect(CONFIG).toEqual({ reasoningContract: true, stepSummary: false, debug: false })
+    expect(CONFIG).toEqual({ reasoningContract: true, stepSummary: false, turnSummary: false, debug: false })
   })
 
   it('accepts overrides and keeps every other default', () => {
     expect(resolveConfig({ stepSummary: true })).toEqual({
-      reasoningContract: true, stepSummary: true, debug: false,
+      reasoningContract: true, stepSummary: true, turnSummary: false, debug: false,
     })
   })
 
@@ -387,6 +387,35 @@ describe('summarize installation', () => {
   }
 
   /**
+   * Mount with an injected llm and capture every handler by event name.
+   *
+   * The turn path needs the config turned on explicitly: `turnSummary` is off
+   * by default and the hook returns early when it is, so a test that mounted
+   * with only `stepSummary` would pass while exercising nothing.
+   */
+  function mountTurn(reply = 'the turn taught X') {
+    const registered = []
+    const calls = []
+    const warns = []
+    const llm = {
+      prepareCall: async (config) => ({ config, stream: (options) => { calls.push(options); return chunks(reply) } }),
+    }
+    const ctx = {
+      on: (event, handler) => registered.push([event, handler]),
+      systemPrompt: { section: () => {} },
+      inject: (_services, callback) => callback({ llm }),
+      logger: { info: vi.fn(), warn: (line) => warns.push(line) },
+    }
+    apply(ctx, { stepSummary: true, turnSummary: true })
+    return {
+      stopping: registered.find(([e]) => e === 'agent/turn-stopping')?.[1],
+      calls,
+      warns,
+      ctx,
+    }
+  }
+
+  /**
    * Yield a stream in the host's REAL chunk vocabulary.
    *
    * The deltas are `text-delta` / `reasoning-delta`, not a generic `delta`, and
@@ -464,6 +493,129 @@ describe('summarize installation', () => {
     expect(appended[0].opts.sourceEventSeqs).toContain(appended[0].opts.surfaceOp.startSeq)
     expect(appended[0].opts.sourceEventSeqs).toContain(appended[0].opts.surfaceOp.endSeq)
     expect(appended[0].data.summaryOf).toEqual({ turn: 1, step: 1 })
+  })
+
+  describe('turn records', () => {
+    /**
+     * A finished turn, as the host writes one.
+     *
+     * `completedSession` cannot serve here: it has no `turn/start`, and the
+     * turn path locates its turn by reading that event.
+     */
+    function finishedTurn() {
+      seq_counter = 0
+      const events = [
+        { seq: 0, type: 'request/header', data: { header: { config: { provider: 'deepseek-official', model: 'deepseek-flash' } }, reason: 'initial' } },
+        { seq: 1, type: 'turn/start', data: { turn: 4 } },
+        ...log({ turn: 4, step: 1 }),
+        { seq: 99, type: 'turn/end', data: { turn: 4, reason: { kind: 'completed' } } },
+      ]
+      return {
+        events,
+        appended: [],
+        deriveMessages: () => [{ role: 'user', content: [text('do the thing')] }],
+        snapshotEvents: () => events,
+        options: { provider: 'deepseek-official', model: 'deepseek-flash' },
+        append(type, data, opts) {
+          if (type === 'user/message' && opts?.surfaceOp === undefined) {
+            throw new Error('session event "user/message" is surface-eligible and requires a surfaceOp marker')
+          }
+          this.appended.push({ type, data, opts })
+        },
+      }
+    }
+
+    it('appends a turn record without replacing anything', async () => {
+      const { stopping } = mountTurn()
+      const target = finishedTurn()
+      await stopping({ agent: { session: target }, turn: 4, signal: undefined })
+      const appended = target.appended
+      expect(appended).toHaveLength(1)
+      expect(appended[0].type).toBe('user/message')
+      expect(appended[0].data.content[0].text).toContain('[turn summary]')
+      expect(appended[0].data.content[0].text).toContain('the turn taught X')
+      expect(appended[0].data.source.kind).toBe('plugin')
+      // Purely an addition. A replace here would delete a span the step records
+      // already own, and `rawSeqs`/`sourceEventSeqs` have nothing to cite.
+      expect(appended[0].opts.surfaceOp).toBe('append')
+      expect(appended[0].opts.sourceEventSeqs).toBeUndefined()
+      expect(appended[0].data.summaryOfTurn).toBe(4)
+      expect(appended[0].data.summaryOf).toBeUndefined()
+      expect(appended[0].data.rawSeqs).toBeUndefined()
+    })
+
+    it('asks with the turn prompt, not the step prompt', async () => {
+      const { stopping, calls } = mountTurn()
+      await stopping({ agent: { session: finishedTurn() }, turn: 4, signal: undefined })
+      expect(calls).toHaveLength(1)
+      const flat = JSON.stringify(calls[0].messages)
+      expect(flat).toContain('轮')
+      // The step prompt is a replacement record; reusing it here would ask the
+      // turn's last step to be written down twice.
+      expect(flat).not.toContain('这是读者今后唯一会再看到的关于这一步的记录')
+    })
+
+    it('writes one record per turn, however often the hook fires', async () => {
+      const { stopping } = mountTurn()
+      const target = finishedTurn()
+      const hook = { agent: { session: target }, turn: 4, signal: undefined }
+      // `agent/turn-stopping` fires once per step the turn bought. Without the
+      // claim, a turn that took three steps would be written down three times.
+      await stopping(hook)
+      await stopping(hook)
+      await stopping(hook)
+      expect(target.appended).toHaveLength(1)
+    })
+
+    it('writes nothing when the model says the turn added nothing', async () => {
+      const { stopping } = mountTurn('NONE')
+      const target = finishedTurn()
+      await stopping({ agent: { session: target }, turn: 4, signal: undefined })
+      // Most turns settle no preference, teach nothing and find no new pattern.
+      // The record is an addition, so emptiness is the normal case, not a fault.
+      expect(target.appended).toHaveLength(0)
+    })
+
+    it('does nothing when the turn summary is switched off', async () => {
+      const registered = []
+      const llm = { prepareCall: async (config) => ({ config, stream: () => chunks('x') }) }
+      apply({
+        on: (event, handler) => registered.push([event, handler]),
+        systemPrompt: { section: () => {} },
+        inject: (_services, callback) => callback({ llm }),
+        logger: { info: () => {}, warn: () => {} },
+      }, { stepSummary: true })
+      const stopping = registered.find(([e]) => e === 'agent/turn-stopping')?.[1]
+      const target = finishedTurn()
+      await stopping({ agent: { session: target }, turn: 4, signal: undefined })
+      expect(target.appended).toHaveLength(0)
+    })
+
+    it('never lets a failure escape into the turn', async () => {
+      const registered = []
+      const llm = {
+        prepareCall: async () => {
+          const error = new Error('rate limited')
+          error.code = 'RATE_LIMITED'
+          throw error
+        },
+      }
+      const ctx = {
+        on: (event, handler) => registered.push([event, handler]),
+        systemPrompt: { section: () => {} },
+        inject: (_services, callback) => callback({ llm }),
+        logger: { info: () => {}, warn: () => {} },
+      }
+      apply(ctx, { stepSummary: true, turnSummary: true })
+      const stopping = registered.find(([e]) => e === 'agent/turn-stopping')?.[1]
+      // A record improves the next turn's context. It is never a precondition
+      // for finishing this one, so a provider failure must not reject the hook.
+      await expect(stopping({
+        agent: { session: finishedTurn() },
+        turn: 4,
+        signal: undefined,
+      })).resolves.toBeUndefined()
+    })
   })
 
   it('sends the projected context, not extracted material', async () => {

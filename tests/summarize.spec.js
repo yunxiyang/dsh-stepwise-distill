@@ -1,11 +1,17 @@
 import { describe, expect, it } from 'vitest'
 import {
   SUMMARY_MARKER,
+  TURN_MARKER,
+  isNoTurnSummary,
   isSummaryText,
+  isTurnText,
   parseSummary,
   renderStepMaterial,
   renderSummaryMessage,
+  renderTurnMessage,
   summarizePrompt,
+  turnInstruction,
+  turnPrompt,
 } from '../src/summarize.js'
 import { dropSummarizedSteps } from '../src/distill.js'
 
@@ -121,6 +127,50 @@ describe('stored summary messages', () => {
   it('does not mistake ordinary text for a summary', () => {
     expect(isSummaryText('the step summary says otherwise')).toBe(false)
     expect(isSummaryText(undefined)).toBe(false)
+  })
+})
+
+describe('turn records', () => {
+  it('carries its own marker, distinct from the step marker', () => {
+    // The step scan collects records by prefix. A turn record sharing that
+    // prefix would be counted as a step record, reporting work that was never
+    // summarized and standing in for a step nobody wrote about.
+    const message = renderTurnMessage('  The user wants flags named explicitly.  ')
+    expect(message).toBe(`${TURN_MARKER} The user wants flags named explicitly.`)
+    expect(isTurnText(message)).toBe(true)
+    expect(isSummaryText(message)).toBe(false)
+    expect(isTurnText(`${SUMMARY_MARKER} x`)).toBe(false)
+  })
+
+  it('recognises the answer that says the turn added nothing', () => {
+    // Most turns settle nothing worth keeping. The prompt asks for this word so
+    // that "nothing to write" is distinguishable from an empty reply, which is
+    // treated as a failure worth reporting.
+    // Exact, after trimming and shedding trailing punctuation: the prompt asks
+    // for this token, so a sentence merely starting with it does not qualify.
+    for (const value of ['NONE', '  NONE  ', 'NONE.', 'NONE。']) {
+      expect(isNoTurnSummary(value)).toBe(true)
+    }
+    expect(isNoTurnSummary('无')).toBe(true)
+    expect(isNoTurnSummary('无。')).toBe(true)
+    // Case matters: the token is what the prompt asks for, so a sentence
+    // starting with a lower-case "none" is content, not a decline.
+    expect(isNoTurnSummary('none')).toBe(false)
+    expect(isNoTurnSummary('None of the above applies here.')).toBe(false)
+    expect(isNoTurnSummary('None of the above applies here.')).toBe(false)
+    expect(isNoTurnSummary('')).toBe(false)
+  })
+
+  it('asks about the turn, not the step', () => {
+    // The two prompts are separate by design: a step record replaces its
+    // material, a turn record is added on top. Reusing the step prompt would ask
+    // the model to write down the last step a second time.
+    const flat = turnPrompt()
+    // The marker is added by `renderTurnMessage`, not by the prompt: it labels
+    // the message written to the log, and the prompt has no reason to name it.
+    expect(flat).not.toContain(TURN_MARKER)
+    expect(flat).not.toContain('这是读者今后唯一会再看到的关于这一步的记录')
+    expect(turnInstruction()).not.toContain('最后一步')
   })
 })
 
