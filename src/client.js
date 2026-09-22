@@ -54,45 +54,48 @@ window.__ModuleLoader__.load({
       // projection, so a later read can drop entries, and an open body must
       // not end up on a different record.
       const [openId, setOpenId] = useState(null)
-      // The pointer, tracked in a ref rather than state: the append callback
-      // reads it at the instant a record lands, and a state update may not have
-      // been applied by then. Leaving counts as looking away -- there is no
-      // grace period, so a reader who has moved off the panel gets interrupted.
-      const pointing = react.useRef(false)
 
-      useEffect(() => {
-        // A tab is remounted before the injected fiber re-fires, so this runs
-        // more than once per panel and the previous request must be abandoned
-        // rather than allowed to land on a newer render's state.
-        let cancelled = false
-        if (sessionId === '') {
-          setRecords([])
-          return () => { cancelled = true }
+      // One reader, not one per effect: the subscribe effect below has to ask
+      // for the list again when the log moves, and a `read` defined inside the
+      // mounting effect would not be in its closure. It returns the records
+      // rather than only setting them, so the caller can compare.
+      const read = react.useCallback(async () => {
+        if (sessionId === '') return []
+        try {
+          const response = await fetch(RECORDS_ROUTE, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ sessionId }),
+          })
+          if (!response.ok) throw new Error(`HTTP ${response.status}`)
+          const payload = await response.json()
+          if (payload?.ok !== true) throw new Error('records read failed')
+          const value = Array.isArray(payload.value) ? payload.value : []
+          setRecords(value)
+          return value
+        } catch (failure) {
+          setError(String(failure?.message ?? failure))
+          return []
         }
-        const read = async () => {
-          try {
-            const response = await fetch(RECORDS_ROUTE, {
-              method: 'POST',
-              headers: { 'content-type': 'application/json' },
-              body: JSON.stringify({ sessionId }),
-            })
-            if (!response.ok) throw new Error(`HTTP ${response.status}`)
-            const payload = await response.json()
-            if (payload?.ok !== true) throw new Error('records read failed')
-            if (!cancelled) setRecords(Array.isArray(payload.value) ? payload.value : [])
-          } catch (failure) {
-            if (!cancelled) setError(String(failure?.message ?? failure))
-          }
-        }
-        read()
-        return () => { cancelled = true }
       }, [sessionId])
 
       useEffect(() => {
-        // A turn record appears while the turn is ending, long after this panel
-        // mounted, and the host answers the list request only when asked. Its
-        // event source is what makes the arrival visible without polling: the
-        // callback carries nothing, so the snapshot is read back out of it.
+        // A tab is remounted before the injected fiber re-fires, so this runs
+        // more than once per panel. The abandoned flag is what keeps a slow
+        // reply from landing on a newer render's state; `read` itself is shared
+        // with the subscribe effect, which has its own cancelled flag.
+        if (sessionId === '') { setRecords([]); return undefined }
+        void read()
+        return undefined
+      }, [read, sessionId])
+
+      useEffect(() => {
+        // A turn record is written while the turn is ending, long after this
+        // panel mounted, and the host answers the list request only when asked.
+        // The session's event source is what makes that moment visible without
+        // polling: it fires as the turn closes, and the read that follows picks
+        // up the record. The callback carries nothing, so the change it reports
+        // is read back out of the snapshot.
         const sessions = props?.sessions
         if (sessionId === '' || sessions === undefined) return undefined
         const binding = sessions.binding?.(sessionId)
@@ -101,15 +104,21 @@ window.__ModuleLoader__.load({
 
         let cancelled = false
         const unsubscribe = source.subscribe(() => {
-          if (cancelled || pointing.current) return
+          if (cancelled) return
           const change = source.getSnapshot?.()?.change
+          // `settle-assistant` closes an attempt and carries no entries; only an
+          // append means the log moved, which is when a record can have landed.
           if (change?.kind !== 'append') return
-          for (const entry of change.entries ?? []) {
-            const data = entry?.type === 'event' ? entry.event?.data : undefined
-            if (data?.source?.plugin !== PLUGIN_ID) continue
-            if (typeof data.summaryOfTurn !== 'number') continue
-            if (!cancelled && !pointing.current) setOpenId(`turn-${data.summaryOfTurn}-?`)
-          }
+          // The turn record is written during `agent/turn-stopping`, and the
+          // push for that moment carries `turn/end` alone -- the record is not
+          // in the batch, so nothing about the entries can name it. Asking
+          // again after the log moves is what picks it up, and the newest turn
+          // record is the one that just landed.
+          void read().then((next) => {
+            if (cancelled || next === null) return
+            const turns = next.filter((item) => item?.kind === 'turn')
+            if (turns.length > 0) setOpenId(turns[0]?.id ?? null)
+          })
         })
         return () => { cancelled = true; unsubscribe?.() }
       }, [props?.sessions, sessionId])
@@ -121,11 +130,6 @@ window.__ModuleLoader__.load({
 
       return createElement('div', {
         className: 'dsh-stepwise-distill',
-        // The pointer is the only thing that may outrank the automatic open:
-        // a reader who is on the panel is reading it, and an append that
-        // collapsed their record would be the panel interrupting them.
-        onMouseEnter: () => { pointing.current = true },
-        onMouseLeave: () => { pointing.current = false },
         style: { padding: '12px', font: '12px/1.6 system-ui, sans-serif' },
       }, [
         createElement('div', {
