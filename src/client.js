@@ -54,6 +54,11 @@ window.__ModuleLoader__.load({
       // projection, so a later read can drop entries, and an open body must
       // not end up on a different record.
       const [openId, setOpenId] = useState(null)
+      // The pointer, tracked in a ref rather than state: the append callback
+      // reads it at the instant a record lands, and a state update may not have
+      // been applied by then. Leaving counts as looking away -- there is no
+      // grace period, so a reader who has moved off the panel gets interrupted.
+      const pointing = react.useRef(false)
 
       useEffect(() => {
         // A tab is remounted before the injected fiber re-fires, so this runs
@@ -83,6 +88,32 @@ window.__ModuleLoader__.load({
         return () => { cancelled = true }
       }, [sessionId])
 
+      useEffect(() => {
+        // A turn record appears while the turn is ending, long after this panel
+        // mounted, and the host answers the list request only when asked. Its
+        // event source is what makes the arrival visible without polling: the
+        // callback carries nothing, so the snapshot is read back out of it.
+        const sessions = props?.sessions
+        if (sessionId === '' || sessions === undefined) return undefined
+        const binding = sessions.binding?.(sessionId)
+        const source = binding?.eventSource
+        if (source === undefined || typeof source.subscribe !== 'function') return undefined
+
+        let cancelled = false
+        const unsubscribe = source.subscribe(() => {
+          if (cancelled || pointing.current) return
+          const change = source.getSnapshot?.()?.change
+          if (change?.kind !== 'append') return
+          for (const entry of change.entries ?? []) {
+            const data = entry?.type === 'event' ? entry.event?.data : undefined
+            if (data?.source?.plugin !== PLUGIN_ID) continue
+            if (typeof data.summaryOfTurn !== 'number') continue
+            if (!cancelled && !pointing.current) setOpenId(`turn-${data.summaryOfTurn}-?`)
+          }
+        })
+        return () => { cancelled = true; unsubscribe?.() }
+      }, [props?.sessions, sessionId])
+
       const loading = records === null && error === null
       const list = records ?? []
       const turns = list.filter((item) => item?.kind === 'turn')
@@ -90,6 +121,11 @@ window.__ModuleLoader__.load({
 
       return createElement('div', {
         className: 'dsh-stepwise-distill',
+        // The pointer is the only thing that may outrank the automatic open:
+        // a reader who is on the panel is reading it, and an append that
+        // collapsed their record would be the panel interrupting them.
+        onMouseEnter: () => { pointing.current = true },
+        onMouseLeave: () => { pointing.current = false },
         style: { padding: '12px', font: '12px/1.6 system-ui, sans-serif' },
       }, [
         createElement('div', {
@@ -127,7 +163,15 @@ window.__ModuleLoader__.load({
      */
     function section(label, items, kind, openId, setOpenId) {
       if (items.length === 0) return null
-      const sorted = [...items].sort((a, b) => (b?.turn ?? 0) - (a?.turn ?? 0))
+      // `turn` alone ties every record of one turn together, and a stable sort
+      // leaves ties in log order -- oldest first, which is backwards here. The
+      // step number is what orders records within a turn, so it is the second
+      // key. A turn record has no step and is alone in its turn, so it never
+      // reaches the tiebreak.
+      const sorted = [...items].sort((a, b) => {
+        const turn = (b?.turn ?? 0) - (a?.turn ?? 0)
+        return turn !== 0 ? turn : (b?.step ?? 0) - (a?.step ?? 0)
+      })
       return createElement('div', {
         key: `section-${kind}`,
         style: { marginTop: '12px' },
@@ -245,12 +289,15 @@ window.__ModuleLoader__.load({
           own(injected.slots.inject('sidebar.right.pane.tab', () => injected.slots.register({
             name: 'sidebar.right.pane.tab',
             key: TAB_ID,
-            // Probe, not a decision: the seat is declared `scope: "session"` in
-            // the host's own registry, but that declaration sits on the parent
-            // chain under `rightbar.session`, which this plugin does not join.
-            // Whether the callback is handed a value is therefore unknown until
-            // it renders one -- so the tab shows what it got either way.
-            inject: (sessionId) => ({ sessionId }),
+            // The seat is declared `scope: "session"` in the host's own
+            // registry; that declaration sits on the parent chain under
+            // `rightbar.session`, which this plugin does not join, so it was
+            // verified by rendering the value before anything depended on it.
+            //
+            // `sessions` rides along rather than being read from the factory
+            // scope: the panel subscribes to the session's event source, and
+            // that service is only reachable through an injected context.
+            inject: (sessionId) => ({ sessionId, sessions: ctx.get('sessions') }),
           }, (props) => createElement(DistillTab, { ...props, host: 'sidebar' }))))
 
           own(injected.slots.inject('sidebar.right.pane.tab.title', () => injected.slots.register({
@@ -266,6 +313,9 @@ window.__ModuleLoader__.load({
       })
     }
 
-    return { apply, name: PLUGIN_ID, inject: ['slots'] }
+    // `sessions` is declared because the panel subscribes to the session's
+    // event source. The host rejects an undeclared service, so a plain function
+    // plugin would have no way to reach it.
+    return { apply, name: PLUGIN_ID, inject: ['slots', 'sessions'] }
   },
 })
