@@ -34,6 +34,9 @@
       "types": "./lib/distill.d.ts",
       "default": "./lib/distill.js"
     },
+    "./client": {
+      "default": "./lib/client.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [
@@ -43,6 +46,7 @@
     "lib/distill.d.ts",
     "lib/summarize.js",
     "lib/summarize.d.ts",
+    "lib/client.js",
     "cordis.patch.yml",
     "CHANGELOG.md",
     "README.md",
@@ -62,6 +66,12 @@
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-sidebar-right"
+      ],
+      "platform": "web"
     }
   },
   "dependencies": {

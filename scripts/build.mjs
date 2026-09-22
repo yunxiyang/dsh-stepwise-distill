@@ -17,6 +17,7 @@ const PAIRS = [
   ['src/index.d.ts', 'lib/index.d.ts'],
   ['src/distill.d.ts', 'lib/distill.d.ts'],
   ['src/summarize.d.ts', 'lib/summarize.d.ts'],
+  ['src/client.js', 'lib/client.js'],
 ]
 
 for (const [source, artifact] of PAIRS) {
