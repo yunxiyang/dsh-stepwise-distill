@@ -660,36 +660,49 @@ function recordsOf(session) {
 }
 
 /**
- * Every retention record in the log, both kinds, in the order they were made.
+ * Every retention record the model can currently see, both kinds.
  *
  * Not {@link recordsOf}: that one requires `rawSeqs`, which only a step record
  * has. A turn record is appended and replaces nothing, so it carries no
  * `rawSeqs` and would be dropped -- silently, which is the failure mode this
  * plugin has already been bitten by once.
  *
+ * Read from the projection, not the log. The log keeps every record ever
+ * written, including the ones a later request replaced, so a tab built from it
+ * would list records the model can no longer see -- the opposite of what the
+ * tab is for. `deriveMessages` is this session's projection, so it is what
+ * answers "what is in the context now".
+ *
  * A record is classified by what it wrote, never by guessing from position: a
  * step record carries `summaryOf` (the turn/step it covers) and the `rawSeqs`
  * it replaced; a turn record carries `summaryOfTurn` and no `rawSeqs`.
  *
+ * Each record carries an `id` because the client needs one thing it can hold
+ * on to: the tab opens one record's text at a time, and it has to keep pointing
+ * at the same record when a later read returns a different list. Position in
+ * the list cannot serve -- the projection changes -- so the id is derived from
+ * what the record says it covers, and is stable across reads.
+ *
  * @param session - the running session.
- * @returns `{ seq, kind, text, turn, step }` per record, in log order.
+ * @returns `{ id, kind, text, turn, step }` per record, in projection order.
  */
 function retentionRecords(session) {
+  if (typeof session?.deriveMessages !== 'function') return []
   const records = []
-  for (const event of readEvents(session)) {
-    if (event?.type !== 'user/message') continue
-    const data = event.data
+  for (const data of session.deriveMessages()) {
     if (data?.source?.plugin !== name) continue
     const text = textOfMessage(data)
     if (text.length === 0) continue
     const isTurn = typeof data.summaryOfTurn === 'number'
     const step = data.summaryOf
+    const turn = isTurn ? data.summaryOfTurn : (typeof step?.turn === 'number' ? step.turn : null)
+    const within = isTurn ? null : (typeof step?.step === 'number' ? step.step : null)
     records.push({
-      seq: event.seq,
+      id: `${isTurn ? 'turn' : 'step'}-${turn ?? '?'}-${within ?? '?'}`,
       kind: isTurn ? 'turn' : 'step',
       text,
-      turn: isTurn ? data.summaryOfTurn : (typeof step?.turn === 'number' ? step.turn : null),
-      step: isTurn ? null : (typeof step?.step === 'number' ? step.step : null),
+      turn,
+      step: within,
     })
   }
   return records

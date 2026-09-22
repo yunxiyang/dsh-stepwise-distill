@@ -49,10 +49,11 @@ window.__ModuleLoader__.load({
       const [error, setError] = useState(null)
       // One open body at a time. The bodies are long enough that several open
       // at once would push every later record off the panel, which defeats the
-      // reason for opening one. Keyed by seq, not by list position: a later
-      // read that reorders the list must not move an open body to a different
-      // record.
-      const [openSeq, setOpenSeq] = useState(null)
+      // reason for opening one. Keyed by the id the record derives from the
+      // span it covers, not by list position: the server answers from the
+      // projection, so a later read can drop entries, and an open body must
+      // not end up on a different record.
+      const [openId, setOpenId] = useState(null)
 
       useEffect(() => {
         // A tab is remounted before the injected fiber re-fires, so this runs
@@ -107,8 +108,8 @@ window.__ModuleLoader__.load({
           key: 'empty',
           style: { opacity: 0.7 },
         }, '本次会话还没有记录。'),
-        section('轮间记录', turns, 'turn', openSeq, setOpenSeq),
-        section('步间记录', steps, 'step', openSeq, setOpenSeq),
+        section('轮间记录', turns, 'turn', openId, setOpenId),
+        section('步间记录', steps, 'step', openId, setOpenId),
       ])
     }
 
@@ -124,9 +125,9 @@ window.__ModuleLoader__.load({
      * closes the rest, so the open state is held by the parent rather than by
      * each entry.
      */
-    function section(label, items, kind, openSeq, setOpenSeq) {
+    function section(label, items, kind, openId, setOpenId) {
       if (items.length === 0) return null
-      const sorted = [...items].sort((a, b) => (a?.turn ?? a?.seq ?? 0) - (b?.turn ?? b?.seq ?? 0))
+      const sorted = [...items].sort((a, b) => (b?.turn ?? 0) - (a?.turn ?? 0))
       return createElement('div', {
         key: `section-${kind}`,
         style: { marginTop: '12px' },
@@ -135,17 +136,20 @@ window.__ModuleLoader__.load({
           key: 'label',
           style: { fontWeight: 600, opacity: 0.8, marginBottom: '4px' },
         }, `${label}（${items.length}）`),
-        ...sorted.map((item, index) => {
-          const seq = item?.seq
-          const open = openSeq !== null && seq === openSeq
+        ...sorted.map((item) => {
+          // Keyed by the record's own identity, not by list position: a later
+          // read can return a different list, and an open body must not land on
+          // a different record than it started on.
+          const id = item?.id
+          const open = openId !== null && id === openId
           return createElement('div', {
-          key: `entry-${kind}-${seq ?? index}`,
+          key: `entry-${kind}-${id}`,
           style: { borderTop: '1px solid rgba(128,128,128,0.25)', paddingTop: '6px', marginTop: '6px' },
         }, [
           createElement('button', {
             key: 'at',
             type: 'button',
-            onClick: () => setOpenSeq(open ? null : seq),
+            onClick: () => setOpenId(open ? null : id),
             style: {
               display: 'block',
               width: '100%',
@@ -168,12 +172,11 @@ window.__ModuleLoader__.load({
       ])
     }
 
-    /** Where a record belongs, as far as the log says. */
+    /** Where a record belongs, as far as the record itself says. */
     function where(item) {
       if (item?.kind === 'turn') return `turn ${item.turn ?? '?'}`
-      return item?.turn === null || item?.turn === undefined
-        ? `seq ${item.seq}`
-        : `turn ${item.turn}, step ${item.step}`
+      if (item?.turn === null || item?.turn === undefined) return '本轮的记录'
+      return `turn ${item.turn}, step ${item.step ?? '?'}`
     }
 
     /** The label shown on the tab strip, and in the panel's guide list. */
