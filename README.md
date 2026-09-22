@@ -117,12 +117,15 @@ problem, not before.
   config:
     reasoningContract: true   # ask for a written conclusion each step (default: true)
     stepSummary: false        # summarize each completed step (default: false)
+    turnSummary: false        # write one note at the end of each turn (default: false)
     debug: false
 ```
 
 `stepSummary` is off by default because of what it costs -- one extra request
 per step, carrying the whole current context, plus one more model round-trip
 before the next step can start. See [What it costs](#what-it-costs).
+`turnSummary` is off for the same reason, once per turn instead of once per
+step.
 
 ## Install
 
