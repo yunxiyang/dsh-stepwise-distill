@@ -269,7 +269,14 @@ window.__ModuleLoader__.load({
       // not end up on a different record.
       const [openId, setOpenId] = useState(null)
 
-      // One reader, not one per effect: the subscribe effect below has to ask
+       // The number of the turn the effects below last opened. Every append
+       // moves the log -- step records land the same way -- so `append` alone
+       // would re-open a body once per step. The turn number is the one value
+       // that changes only when a turn ends, which is what makes the trigger
+       // "a turn just finished" rather than "the log moved".
+       const lastTurn = react.useRef(null)
+
+       // One reader, not one per effect: the subscribe effect below has to ask
       // for the list again when the log moves, and a `read` defined inside the
       // mounting effect would not be in its closure. It returns the records
       // rather than only setting them, so the caller can compare.
@@ -304,7 +311,9 @@ window.__ModuleLoader__.load({
         // newest first, so the first turn record is the one to open.
         void read().then((next) => {
           const newest = next.find((item) => item?.kind === 'turn')
-          if (newest !== undefined) setOpenId(newest.id ?? null)
+          if (newest === undefined) return
+          if (typeof newest.turn === 'number') lastTurn.current = newest.turn
+          setOpenId(newest.id ?? null)
         })
         return undefined
       }, [read, sessionId])
@@ -337,9 +346,15 @@ window.__ModuleLoader__.load({
           void read().then((next) => {
             if (cancelled || next === null) return
             // Sorted by the server, newest first, so the first turn record in
-            // the list is the one that just landed. Nothing here compares.
+            // the list is the newest one. The turn number is what tells a
+            // finished turn apart from a step record landing: within one turn
+            // the number does not move, so nothing opens until the turn ends.
             const newest = next.find((item) => item?.kind === 'turn')
-            if (newest !== undefined) setOpenId(newest.id ?? null)
+            if (newest === undefined) return
+            if (typeof newest.turn !== 'number') return
+            if (newest.turn <= (lastTurn.current ?? -1)) return
+            lastTurn.current = newest.turn
+            setOpenId(newest.id ?? null)
           })
         })
         return () => { cancelled = true; unsubscribe?.() }
