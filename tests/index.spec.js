@@ -73,15 +73,15 @@ function record(key) {
 const CONFIG = resolveConfig({})
 
 describe('config', () => {
-  it('defaults every switch off', () => {
-    // Both summaries are off by default because each spends one request:
-    // step summary per step, turn summary per turn.
-    expect(CONFIG).toEqual({ stepSummary: false, turnSummary: false, debug: false })
+  it('defaults both summaries on and the log off', () => {
+    // Both summaries are on by default because they are what the plugin is
+    // for; each costs one extra request. The log stays off -- it is for diagnosing.
+    expect(CONFIG).toEqual({ stepSummary: true, turnSummary: true, debug: false })
   })
 
   it('accepts overrides and keeps every other default', () => {
     expect(resolveConfig({ stepSummary: true })).toEqual({
-      stepSummary: true, turnSummary: false, debug: false,
+      stepSummary: true, turnSummary: true, debug: false,
     })
   })
 
@@ -115,7 +115,7 @@ describe('migration notice', () => {
       inject: () => {},
       logger: { info: vi.fn(), warn: vi.fn() },
     }
-    apply(ctx, {})
+        apply(ctx, {})
       expect(sections).toEqual([])
   })
 })
@@ -320,11 +320,12 @@ describe('summarize installation', () => {
   /**
    * Mount with an injected llm and capture every handler by event name.
    *
-   * The turn path needs the config turned on explicitly: `turnSummary` is off
-   * by default and the hook returns early when it is, so a test that mounted
-   * with only `stepSummary` would pass while exercising nothing.
+   * The switches are written out at the mount site rather than left to the
+   * defaults, so that a test can turn one off and still be sure the rest of
+   * the path runs -- a mount that exercises nothing passes for the wrong
+   * reason.
    */
-  function mountTurn(reply = 'the turn taught X') {
+  function mountTurn(reply = 'the turn taught X', config = {}) {
     const registered = []
     const calls = []
     const warns = []
@@ -337,7 +338,7 @@ describe('summarize installation', () => {
       inject: (_services, callback) => callback({ llm }),
       logger: { info: vi.fn(), warn: (line) => warns.push(line) },
     }
-    apply(ctx, { stepSummary: true, turnSummary: true })
+    apply(ctx, { stepSummary: true, turnSummary: true, ...config })
     return {
       stopping: registered.find(([e]) => e === 'agent/turn-stopping')?.[1],
       calls,
@@ -515,7 +516,7 @@ describe('summarize installation', () => {
         systemPrompt: { section: () => {} },
         inject: (_services, callback) => callback({ llm }),
         logger: { info: () => {}, warn: () => {} },
-      }, { stepSummary: true })
+      }, { stepSummary: true, turnSummary: false })
       const stopping = registered.find(([e]) => e === 'agent/turn-stopping')?.[1]
       const target = finishedTurn()
       await stopping({ agent: { session: target }, turn: 4, signal: undefined })
@@ -537,7 +538,7 @@ describe('summarize installation', () => {
         inject: (_services, callback) => callback({ llm }),
         logger: { info: () => {}, warn: () => {} },
       }
-      apply(ctx, { stepSummary: true, turnSummary: true })
+      apply(ctx, { stepSummary: true, turnSummary: false })
       const stopping = registered.find(([e]) => e === 'agent/turn-stopping')?.[1]
       // A record improves the next turn's context. It is never a precondition
       // for finishing this one, so a provider failure must not reject the hook.
@@ -591,7 +592,7 @@ describe('summarize installation', () => {
       inject: (_s, cb) => cb({ llm: { prepareCall: async () => ({ stream: () => chunks('x') }) } }),
       logger: { info: vi.fn(), warn: vi.fn() },
     }
-    apply(ctx, {})
+    apply(ctx, { stepSummary: false })
     await registered.find(([e]) => e === 'agent/pre-step')[1](
       { agent: { session }, turn: 2, step: 1 }, () => Promise.resolve({ kind: 'enter' }),
     )

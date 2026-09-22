@@ -51,14 +51,14 @@ export const SETTINGS_NAMESPACE = 'stepwise-distill'
  * What the settings document may carry for this plugin.
  *
  * The schema is the authority: the Host validates every write against it, so a
- * hand-edited settings file cannot hold anything outside these four switches.
+ * hand-edited settings file cannot hold anything outside these three switches.
  * The defaults match `Config`, which the loader applies when the profile sets
  * nothing -- they are repeated rather than imported because a namespace is
  * served whether or not the plugin was given a config.
  */
 export const SettingsSchema = z.object({
-  stepSummary: z.boolean().default(false),
-  turnSummary: z.boolean().default(false),
+  stepSummary: z.boolean().default(true),
+  turnSummary: z.boolean().default(true),
   debug: z.boolean().default(false),
 })
 
@@ -154,9 +154,9 @@ export const LAST_SUMMARY_ERROR = Symbol.for('dsh-stepwise-distill.lastSummaryEr
  */
 export const Config = z.object({
   /** Ask the model for a step summary and keep its raw material out of later turns. */
-  stepSummary: z.boolean().default(false),
+  stepSummary: z.boolean().default(true),
   /** Ask the model what a finished turn added, and append that record to it. */
-  turnSummary: z.boolean().default(false),
+  turnSummary: z.boolean().default(true),
   /** Emit a diagnostic line for every evaluation. */
   debug: z.boolean().default(false),
 })
@@ -172,10 +172,8 @@ export const Config = z.object({
  */
 export function resolveConfig(config) {
   return {
-    stepSummary: config?.stepSummary ?? false,
-    // Off by default: a turn record is an addition, and a session that has not
-    // asked for one should not grow a second kind of entry.
-    turnSummary: config?.turnSummary ?? false,
+    stepSummary: config?.stepSummary ?? true,
+    turnSummary: config?.turnSummary ?? true,
     debug: config?.debug ?? false,
   }
 }

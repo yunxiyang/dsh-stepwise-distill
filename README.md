@@ -2,30 +2,30 @@
 
 [中文](README.zh.md)
 
-Keep a long agent conversation usable by keeping the PROCESS out of the way and
-the RESULT in it.
+Spend roughly twice the money and twice the time to make the context denser, so
+that what reaches the model is worth attending to.
 
-Two mechanisms, both running between steps:
+A long conversation decays into its own history. The agent re-reads thinking it
+has already finished with, patches it has already written to a file, output it
+has already drawn a conclusion from -- and the one thing it needs, the request
+it was given, is a small part of a large prompt. This plugin pays to invert
+that: the same conversation, carrying less of what it did and more of what it
+knows.
 
-- **The newest step keeps its own material.** Every earlier step is already a
-  record, so its raw material -- reasoning, tool arguments, tool output -- is
-  held out of the projection, while the step still in flight keeps all of it.
-- **Each completed step is written down**, and its raw material stops being
-  replayed. A step's reasoning, tool arguments, and tool output are replaced in
-  later turns by the information worth keeping from it: what it did, what it
-  found, what it decided and why.
-
-Neither one deletes anything. The event log is append-only, so every raw byte
-stays where it was; only what the model is shown changes, and `history_read`
-returns any of it by seq.
+It takes two steps: the newest step keeps its own raw material, and every
+earlier step is replaced by a record. Neither one deletes anything -- the event
+log is append-only, only what the model is shown changes, and `history_read`
+returns any raw byte by seq. [How it works](#how-it-works) has the detail.
 
 ## Why, exactly
 
 The goal is not a smaller bill -- this plugin spends tokens and time, see
-[What it costs](#what-it-costs). It is that an agent asked to do something can
-still find that request in its own context an hour later.
+[What it costs](#what-it-costs). It is that the same token budget carries more
+of what the model needs and less of what it has already dealt with.
 
-Measured across sessions, an assistant's own output breaks down roughly as:
+So the question is which part of a long conversation is worth its tokens. The
+answer is not the part that looks biggest. Measured across sessions, an
+assistant's own output breaks down roughly as:
 
 | | share of assistant content |
 |---|---|
@@ -35,11 +35,15 @@ Measured across sessions, an assistant's own output breaks down roughly as:
 
 Reasoning is rarely spread evenly. In one session it was **zero for most turns
 and 143 KB in the first four** -- the exploration phase, where the model worked
-out what the task even was. That is exactly the stretch whose wrong turns get
-re-read forever after.
+out what the task even was. In other words the material being removed is not
+just the largest part, it is the least dense: a lot of text carrying very few
+decisions.
 
 A tool-call argument is usually a patch or a script body: content that has
-already landed in a file. Re-sending its full text every turn buys nothing.
+already landed in a file. Re-sending its full text every turn buys nothing --
+the conclusion it produced is in the record, and the text itself is one
+`history_read` away. What is left in the projection is what the next step
+cannot reconstruct on its own.
 
 ## How it works
 
@@ -82,15 +86,14 @@ plus the newest step is all the next request carries. The log keeps everything.
 
 ## What it costs
 
-This is a trade, not a discount: it spends tokens and wall-clock time to keep a
-long conversation readable.
+This is a trade, and the price is known up front: roughly twice the input
+tokens, and one extra model round trip per step. What it buys is a context whose
+useful content is not diluted by what the agent has already dealt with.
 
-
-**`stepSummary: true` (off by default) sends one extra request per step, and
-that request carries the whole current context.** It is not a digest of the
-step: the request is the summary system prompt, plus the full projected
-context, plus a short instruction. So its input cost is on the order of the
-request you were about to send anyway -- roughly twice the input tokens for
+**`stepSummary` is on by default.** The extra request is not a digest of the
+step: it carries the summary system prompt, the full projected context, and a
+short instruction. So its input cost is on the order of the request you were
+about to send anyway -- roughly twice the input tokens for
 that step, plus the record it writes.
 
 **It also makes every step slower.** The summary goes out before the next
@@ -104,24 +107,24 @@ rewritten in either case: what changes is only what the model is shown.
 
 The saving grows with conversation length while these costs stay flat, so the
 crossover is a long session. On a single short task, expect more tokens and more
-time than without the plugin. Turn `stepSummary` on when replay has become the
-problem, not before.
+time than without the plugin. Turn `stepSummary` and `turnSummary` off when you
+are only doing short tasks.
 
 ## Configuration
 
 ```yaml
 - id: stepwise-distill
   config:
-    stepSummary: false        # summarize each completed step (default: false)
-    turnSummary: false        # write one note at the end of each turn (default: false)
+    stepSummary: true         # summarize each completed step (default: true)
+    turnSummary: true         # write one note at the end of each turn (default: true)
     debug: false
 ```
 
-`stepSummary` is off by default because of what it costs -- one extra request
-per step, carrying the whole current context, plus one more model round-trip
-before the next step can start. See [What it costs](#what-it-costs).
-`turnSummary` is off for the same reason, once per turn instead of once per
-step.
+Both are on by default: they are what the plugin is for, so installing it should
+be enough to get them. Both cost what [What it costs](#what-it-costs) describes
+-- one extra request per step, carrying the whole current context, plus one more
+model round-trip before the next step can start, and the same once per turn for
+`turnSummary`. Set either to `false` when that price is not one you want to pay.
 
 ## Install
 
