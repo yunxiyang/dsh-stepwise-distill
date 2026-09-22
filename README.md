@@ -1,14 +1,15 @@
 # dsh-stepwise-distill
 
+[中文](README.zh.md)
+
 Keep a long agent conversation usable by keeping the PROCESS out of the way and
 the RESULT in it.
 
 Two mechanisms, both running between steps:
 
-- **Reasoning is stripped at projection.** It is 17% of assistant content on
-  average and up to 77% on exploratory tasks, and every later turn re-sends all
-  of it. The model then reads its own churn, its own abandoned attempts, and its
-  own circling -- and continues it.
+- **The newest step keeps its own material.** Every earlier step is already a
+  record, so its raw material -- reasoning, tool arguments, tool output -- is
+  held out of the projection, while the step still in flight keeps all of it.
 - **Each completed step is written down**, and its raw material stops being
   replayed. A step's reasoning, tool arguments, and tool output are replaced in
   later turns by the information worth keeping from it: what it did, what it
