@@ -23,7 +23,7 @@ window.__ModuleLoader__.load({
   id: 'dsh-stepwise-distill',
   factory: (require) => {
     const react = require('react')
-    const { createElement, useState } = react
+    const { createElement, useEffect, useState } = react
 
     const PLUGIN_ID = 'dsh-stepwise-distill'
     /** Identifies this tab among every other right-panel tab. */
@@ -31,14 +31,56 @@ window.__ModuleLoader__.load({
     /** Distinguishes the tab's kind; the host matches entries by this. */
     const TAB_KIND = 'stepwise-distill'
 
+    // Declared on both sides rather than shared: the host half keeps its own
+    // copy in `src/index.js`, and there is no module both halves import.
+    const RECORDS_ROUTE = '/api/stepwise-distill/records'
+
     /**
      * The tab body.
      *
-     * A placeholder until the records are wired up: it states what the tab is
-     * for so that a successful mount is visible rather than an empty panel.
+     * The records live in the session log, which only the host half can read:
+     * the panel's own paging verb is addressed by `seq`, so it cannot be asked
+     * for "everything this session retained". The tab therefore asks the host
+     * for the list, and the host answers from the log it already holds.
      */
     function DistillTab(props) {
-      const [expanded, setExpanded] = useState(false)
+      const sessionId = typeof props?.sessionId === 'string' ? props.sessionId : ''
+      const [records, setRecords] = useState(null)
+      const [error, setError] = useState(null)
+
+      useEffect(() => {
+        // A tab is remounted before the injected fiber re-fires, so this runs
+        // more than once per panel and the previous request must be abandoned
+        // rather than allowed to land on a newer render's state.
+        let cancelled = false
+        if (sessionId === '') {
+          setRecords([])
+          return () => { cancelled = true }
+        }
+        const read = async () => {
+          try {
+            const response = await fetch(RECORDS_ROUTE, {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ sessionId }),
+            })
+            if (!response.ok) throw new Error(`HTTP ${response.status}`)
+            const payload = await response.json()
+            if (payload?.ok !== true) throw new Error('records read failed')
+            if (!cancelled) setRecords(Array.isArray(payload.value) ? payload.value : [])
+          } catch (failure) {
+            if (!cancelled) setError(String(failure?.message ?? failure))
+          }
+        }
+        read()
+        return () => { cancelled = true }
+      }, [sessionId])
+
+      const loading = records === null && error === null
+      const list = records ?? []
+      const turns = list.filter((item) => item?.kind === 'turn')
+      const steps = list.filter((item) => item?.kind !== 'turn')
+
       return createElement('div', {
         className: 'dsh-stepwise-distill',
         style: { padding: '12px', font: '12px/1.6 system-ui, sans-serif' },
@@ -47,21 +89,63 @@ window.__ModuleLoader__.load({
           key: 'title',
           style: { fontWeight: 600, marginBottom: '6px' },
         }, '保留的信息'),
-        createElement('div', {
-          key: 'note',
+        error !== null && createElement('div', {
+          key: 'error',
+          style: { color: '#c0392b' },
+        }, `读取失败：${error}`),
+        loading && createElement('div', {
+          key: 'loading',
           style: { opacity: 0.7 },
-        }, '这里会显示本次会话的步间记录与轮间记录。'),
-        createElement('button', {
-          key: 'toggle',
-          type: 'button',
-          onClick: () => setExpanded((value) => !value),
-          style: { marginTop: '8px' },
-        }, expanded ? '收起' : '展开'),
-        expanded && createElement('pre', {
-          key: 'detail',
-          style: { whiteSpace: 'pre-wrap', marginTop: '8px' },
-        }, `tabId: ${String(props?.tabId ?? 'unknown')}`),
+        }, '读取中…'),
+        !loading && error === null && list.length === 0 && createElement('div', {
+          key: 'empty',
+          style: { opacity: 0.7 },
+        }, '本次会话还没有记录。'),
+        section('轮间记录', turns, 'turn'),
+        section('步间记录', steps, 'step'),
       ])
+    }
+
+    /**
+     * One group of records, newest last.
+     *
+     * Grouped rather than listed together because the two kinds answer
+     * different questions: a step record replaces the step it covers, a turn
+     * record is added on top of everything the turn already had.
+     */
+    function section(label, items, kind) {
+      if (items.length === 0) return null
+      const sorted = [...items].sort((a, b) => (a?.turn ?? a?.seq ?? 0) - (b?.turn ?? b?.seq ?? 0))
+      return createElement('div', {
+        key: `section-${kind}`,
+        style: { marginTop: '12px' },
+      }, [
+        createElement('div', {
+          key: 'label',
+          style: { fontWeight: 600, opacity: 0.8, marginBottom: '4px' },
+        }, `${label}（${items.length}）`),
+        ...sorted.map((item, index) => createElement('div', {
+          key: `entry-${kind}-${index}`,
+          style: { borderTop: '1px solid rgba(128,128,128,0.25)', paddingTop: '6px', marginTop: '6px' },
+        }, [
+          createElement('div', {
+            key: 'at',
+            style: { opacity: 0.6, marginBottom: '2px' },
+          }, where(item)),
+          createElement('pre', {
+            key: 'text',
+            style: { whiteSpace: 'pre-wrap', margin: 0, font: 'inherit' },
+          }, String(item?.text ?? '')),
+        ])),
+      ])
+    }
+
+    /** Where a record belongs, as far as the log says. */
+    function where(item) {
+      if (item?.kind === 'turn') return `turn ${item.turn ?? '?'}`
+      return item?.turn === null || item?.turn === undefined
+        ? `seq ${item.seq}`
+        : `turn ${item.turn}, step ${item.step}`
     }
 
     /** The label shown on the tab strip, and in the panel's guide list. */
@@ -100,6 +184,12 @@ window.__ModuleLoader__.load({
           own(injected.slots.inject('sidebar.right.pane.tab', () => injected.slots.register({
             name: 'sidebar.right.pane.tab',
             key: TAB_ID,
+            // Probe, not a decision: the seat is declared `scope: "session"` in
+            // the host's own registry, but that declaration sits on the parent
+            // chain under `rightbar.session`, which this plugin does not join.
+            // Whether the callback is handed a value is therefore unknown until
+            // it renders one -- so the tab shows what it got either way.
+            inject: (sessionId) => ({ sessionId }),
           }, (props) => createElement(DistillTab, { ...props, host: 'sidebar' }))))
 
           own(injected.slots.inject('sidebar.right.pane.tab.title', () => injected.slots.register({
