@@ -1,8 +1,10 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
+  RECORDS_ROUTE,
   REASONING_SECTION,
   apply,
   inject,
+  name,
   readEvents,
   resolveConfig,
   summarize,
@@ -995,5 +997,140 @@ describe('summary request bounding', () => {
     const projected = session.deriveMessages()
     expect(projected).toHaveLength(1)
     expect(JSON.stringify(projected)).toContain('done')
+  })
+})
+
+describe('records route', () => {
+  // The route is the only exported door onto `retentionRecords` and
+  // `sessionFor`, so the tests go through it rather than widening the exports
+  // for the sake of a fixture. A fake context whose `inject` calls back
+  // synchronously is enough: the plugin registers the route at `apply` time.
+  function mountRoute({ sessions, sessionQuery, connection } = {}) {
+    let registered = null
+    // `sessionFor` reads the session services off the context `apply` was
+    // given, while the route reads `connection` off the injected scope. Both
+    // have to resolve the same names, or a fixture passing one and not the
+    // other makes the plugin look like it found no session at all.
+    const get = (service) => {
+      if (service === 'connection') return connection ?? { fetch: { register: (route) => { registered = route } } }
+      if (service === 'sessions') return sessions
+      if (service === 'sessionQuery') return sessionQuery
+      return undefined
+    }
+    const ctx = {
+      on: () => {},
+      get,
+      inject: (_names, callback) => callback({ get, effect: (fn) => fn() }),
+      logger: { info: vi.fn(), warn: vi.fn() },
+    }
+    apply(ctx, {})
+    return { registered, ctx }
+  }
+
+  function post(registered, body) {
+    return registered.fetch({ json: async () => body })
+  }
+
+  // Only the methods this route reaches for: `deriveMessages` to enumerate the
+  // projection, which is what decides what the model can see.
+  function sessionOf(messages) {
+    return { deriveMessages: () => messages }
+  }
+
+  function record({ kind, turn, step, text: body, plugin = name }) {
+    const data = {
+      source: { kind: 'plugin', plugin },
+      content: [{ type: 'text', text: body }],
+    }
+    if (kind === 'turn') data.summaryOfTurn = turn
+    else data.summaryOf = { turn, step }
+    return data
+  }
+
+  it('registers the route on the connection it is given', () => {
+    const { registered } = mountRoute({})
+    expect(registered.path).toBe(RECORDS_ROUTE)
+    expect(registered.methods).toEqual(['POST'])
+    expect(registered.requestBody).toBe('buffered')
+  })
+
+  it('rejects a request with no sessionId', async () => {
+    const { registered } = mountRoute({})
+    const response = await post(registered, {})
+    expect(response.status).toBe(400)
+    expect(await response.json()).toEqual({ ok: false, error: 'missing sessionId' })
+  })
+
+  it('answers with an empty list when the host has no session for that id', async () => {
+    const { registered } = mountRoute({ sessions: { get: () => undefined } })
+    const response = await post(registered, { sessionId: 'absent' })
+    // No session is not a failure: the tab is opened per session and a cold one
+    // simply has nothing to show yet.
+    expect(response.status).toBe(200)
+    expect(await response.json()).toEqual({ ok: true, value: [] })
+  })
+
+  it('reads the records the model can see, newest first', async () => {
+    const session = sessionOf([
+      record({ kind: 'step', turn: 1, step: 1, text: 'first step' }),
+      record({ kind: 'step', turn: 2, step: 1, text: 'later step' }),
+      record({ kind: 'turn', turn: 1, text: 'first turn' }),
+      // Not written by this plugin, and a message with no text at all: neither
+      // is a record, so neither may reach the panel.
+      record({ kind: 'step', turn: 2, step: 2, text: 'someone else', plugin: 'other' }),
+      { source: { kind: 'plugin', plugin: name }, content: [] },
+    ])
+    const { registered } = mountRoute({ sessions: { get: () => session } })
+    const payload = await (await post(registered, { sessionId: 's1' })).json()
+    expect(payload.ok).toBe(true)
+    // Turn first, then the kinds within that turn: `later step` belongs to turn
+    // 2 and leads, then turn 1's own note sits above the step it summarizes.
+    expect(payload.value.map((item) => item.text)).toEqual(['later step', 'first turn', 'first step'])
+  })
+
+  it('labels a record by what it covers, so the panel can key an open body', async () => {
+    const session = sessionOf([
+      record({ kind: 'turn', turn: 7, text: 'a turn' }),
+      record({ kind: 'step', turn: 7, step: 3, text: 'a step' }),
+    ])
+    const { registered } = mountRoute({ sessions: { get: () => session } })
+    const payload = await (await post(registered, { sessionId: 's1' })).json()
+    expect(payload.value).toHaveLength(2)
+    expect(payload.value[0]).toMatchObject({ id: 'turn-7-?', kind: 'turn', turn: 7, step: null })
+    expect(payload.value[1]).toMatchObject({ id: 'step-7-3', kind: 'step', turn: 7, step: 3 })
+  })
+
+  it('reads a cold session back from persistence', async () => {
+    // The reason the fallback exists: the in-memory lookup only knows the
+    // sessions this host has loaded, and a session reopened after a restart --
+    // exactly when the panel gets opened -- resolves to nothing.
+    const readSession = vi.fn(async () => ({
+      session: { id: 'cold' },
+      inheritedEventCount: 0,
+      events: [log({ turn: 4, step: 1, body: 'recovered' })],
+    }))
+    const { registered } = mountRoute({
+      sessions: { get: () => undefined },
+      sessionQuery: { readSession },
+    })
+    const payload = await (await post(registered, { sessionId: 'cold' })).json()
+    expect(readSession).toHaveBeenCalledWith('cold')
+    expect(payload.ok).toBe(true)
+  })
+
+  it('answers with an empty list when the persistence read fails', async () => {
+    const { registered } = mountRoute({
+      sessions: { get: () => undefined },
+      sessionQuery: { readSession: async () => { throw new Error('gone') } },
+    })
+    const response = await post(registered, { sessionId: 's1' })
+    expect(response.status).toBe(200)
+    expect(await response.json()).toEqual({ ok: true, value: [] })
+  })
+
+  it('loads without a connection to register the route on', () => {
+    // A profile that cannot serve the tab still has to load: the route is
+    // registered from `optionalInject`, so its absence cannot be fatal.
+    expect(() => mountRoute({ connection: {} })).not.toThrow()
   })
 })
