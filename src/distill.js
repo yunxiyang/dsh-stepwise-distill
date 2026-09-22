@@ -44,44 +44,6 @@ function reasoningOf(blocks) {
 }
 
 /**
- * Render the reasoning-discipline contract.
- *
- * The other section governs what survives of a TOOL RESULT; this one governs
- * what survives of the model's own thinking. They are separate because they
- * ask for different things and fail differently, and because this one applies
- * to every step while the other only applies once something has been numbered.
- *
- * The premise is measured: reasoning is 43.7% of assistant content in a long
- * session, concentrated in a few huge blocks (one block of 21 KB carried 99
- * bytes of text). Because it is replayed on every later turn, the model keeps
- * re-reading its own churn, and churn is self-reinforcing: it sees the shape
- * of its own circling and continues it.
- *
- * Reasoning cannot be dropped safely while it is the only place a conclusion
- * exists -- in the measured session, mid-turn steps carried essentially no
- * prose (0-56 bytes) while their conclusions sat inside multi-kilobyte
- * reasoning blocks. So the contract first requires the conclusion to be
- * written down, and only then discards the process.
- *
- * @returns the instruction text.
- */
-export function reasoningContract() {
-  return [
-    'Your reasoning is a scratch pad, not a record: it is NOT kept between steps.',
-    'Only what you write in your reply survives. Anything you worked out and did',
-    'not write down is gone by your next step, and you will have to work it out',
-    'again from the evidence.',
-    'So whenever you finish a step that reached a conclusion, write the conclusion',
-    'in your reply, in plain prose, before moving on: state what you concluded,',
-    'why, and what evidence in the conversation supports it. Keep it short -- a',
-    'sentence or two, not a retelling of how you got there. Write it every step,',
-    'including steps where the conclusion is that something did or did not work.',
-    'Do not restate the plan you were given, and do not narrate the search: the',
-    'value is the conclusion and its justification, not the path.',
-  ].join(' ')
-}
-
-/**
  * Pick the text leaves of one tool-result message.
  *
  * @param message - a `tool/result` message.
@@ -225,60 +187,6 @@ function flattenArguments(value) {
       .join('\n')
   }
   return JSON.stringify(value)
-}
-
-/**
- * Remove reasoning blocks from one projected message.
- *
- * Reasoning is a scratch pad, and the measured cost of keeping it is that the
- * model re-reads its own churn on every later turn: 43.7% of assistant content
- * in a long session, concentrated in a few huge blocks (one of 21 KB carried
- * 99 bytes of text). Churn is self-reinforcing -- seeing the shape of its own
- * circling is what lets a model continue circling.
- *
- * It cannot be dropped by rewriting the log: a `replace` must list the nodes it
- * shadows, that list travels in `sourceEventSeqs`, and a surface-eligible
- * `assistant/message` carrying that field is rejected outright. So the drop
- * happens at projection time instead. The log keeps every block, `history_read`
- * still returns them, and only what the model is shown changes.
- *
- * @param message - one projected message, as `deriveMessages` returns it.
- * @returns the message without reasoning, or `null` when nothing else remains.
- *   `null` matches the host's own rule that an empty-content message does not
- *   join the surface.
- */
-export function stripReasoning(message) {
-  const content = message?.content
-  if (!Array.isArray(content)) return message
-  const kept = content.filter(block => block?.type !== 'reasoning')
-  if (kept.length === content.length) return message
-
-  // A message with a tool call but no text still has to survive: dropping it
-  // would orphan its tool result, and the request would be rejected for having
-  // a result no call produced.
-  if (kept.length === 0) return null
-  return { ...message, content: kept }
-}
-
-/**
- * Apply {@link stripReasoning} across one projected message list.
- *
- * @param messages - the list `deriveMessages` returned.
- * @returns a new list, with emptied messages removed.
- */
-export function stripReasoningFrom(messages) {
-  if (!Array.isArray(messages)) return messages
-  const out = []
-  let changed = false
-  for (const message of messages) {
-    const next = stripReasoning(message)
-    if (next === null) { changed = true; continue }
-    if (next !== message) changed = true
-    out.push(next)
-  }
-  // Returning the original array when nothing changed keeps the hot path from
-  // allocating on every step of a session that carries no reasoning at all.
-  return changed ? out : messages
 }
 
 /**

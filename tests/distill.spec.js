@@ -1,10 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   dropSummarizedSteps,
-  reasoningContract,
   renderHistoryRead,
-  stripReasoning,
-  stripReasoningFrom,
   textLeaves,
 } from '../src/distill.js'
 
@@ -26,107 +23,7 @@ describe('text leaves', () => {
   })
 
 })
-describe('reasoning contract', () => {
-  const section = reasoningContract()
 
-  it('states the consequence before asking for anything', () => {
-    // The consequence is the only leverage a text contract has. Stated as a
-    // fact about how the turn works, not as a threat, because the model has to
-    // believe it to act on it.
-    expect(section).toContain('NOT kept between steps')
-    expect(section).toContain('Only what you write in your reply survives')
-  })
-
-  it('asks for the conclusion, its reason, and its evidence', () => {
-    expect(section).toContain('what you concluded')
-    expect(section).toContain('why')
-    expect(section).toContain('what evidence')
-  })
-
-  it('asks for it every step, including failed ones', () => {
-    // A step that found nothing is exactly the step whose conclusion is most
-    // expensive to rediscover, and the easiest one for a model to skip.
-    expect(section).toContain('every step')
-    expect(section).toContain('did or did not work')
-  })
-
-  it('asks for the conclusion rather than the path', () => {
-    expect(section).toContain('not the path')
-    expect(section).toContain('do not narrate the search')
-  })
-
-  it('does not ask for a specific number of words', () => {
-    // A length target turns into padding, which is the failure this section
-    // exists to prevent.
-    expect(section).not.toMatch(/\b\d+\s+(words|sentences|lines)\b/)
-  })
-})
-
-describe('reasoning strip', () => {
-  it('removes reasoning and keeps everything else', () => {
-    const message = { role: 'assistant', content: [reasoning('churn'), text('the fix landed')] }
-    expect(stripReasoning(message)).toEqual({
-      role: 'assistant', content: [text('the fix landed')],
-    })
-  })
-
-  it('returns the same object when there is nothing to strip', () => {
-    // Identity, not deep equality: the projection hot path must not allocate
-    // for a session that carries no reasoning at all.
-    const message = { role: 'assistant', content: [text('done')] }
-    expect(stripReasoning(message)).toBe(message)
-  })
-
-  it('keeps a tool call even when the message had no prose', () => {
-    // Dropping it would orphan the tool result, and a request carrying a
-    // result no call produced is rejected outright.
-    const message = {
-      role: 'assistant',
-      content: [reasoning('churn'), { type: 'tool-call', name: 'exec_command' }],
-    }
-    expect(stripReasoning(message).content).toEqual([{ type: 'tool-call', name: 'exec_command' }])
-  })
-
-  it('drops a message that was nothing but reasoning', () => {
-    // The host's own rule is that an empty-content message does not join the
-    // surface, so `null` here is the same rule applied one step earlier.
-    expect(stripReasoning({ role: 'assistant', content: [reasoning('churn')] })).toBeNull()
-  })
-
-  it('leaves a malformed message untouched', () => {
-    expect(stripReasoning({ role: 'assistant' })).toEqual({ role: 'assistant' })
-    expect(stripReasoning({ role: 'assistant', content: 'not an array' }).content).toBe('not an array')
-  })
-
-  it('drops emptied messages from a list and keeps the rest in order', () => {
-    const messages = [
-      { role: 'user', content: [text('do it')] },
-      { role: 'assistant', content: [reasoning('only churn')] },
-      { role: 'assistant', content: [reasoning('churn'), text('done')] },
-    ]
-    const out = stripReasoningFrom(messages)
-    expect(out).toHaveLength(2)
-    expect(out[0].content).toEqual([text('do it')])
-    expect(out[1].content).toEqual([text('done')])
-  })
-
-  it('returns the original list when nothing changed', () => {
-    const messages = [{ role: 'user', content: [text('do it')] }]
-    expect(stripReasoningFrom(messages)).toBe(messages)
-  })
-
-  it('preserves every non-reasoning block type', () => {
-    // tool-call args, text and images all have to survive untouched: the
-    // strip must be surgical, not a rebuild of the message.
-    const blocks = [
-      text('a'),
-      { type: 'tool-call', id: 'c1', name: 'read', arguments: '{"path":"x"}' },
-      { type: 'image', attachment: { id: 'img-1' } },
-    ]
-    const out = stripReasoning({ role: 'assistant', content: [reasoning('r'), ...blocks] })
-    expect(out.content).toEqual(blocks)
-  })
-})
 
 describe('tool call retrieval', () => {
   const call = {

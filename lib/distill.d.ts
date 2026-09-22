@@ -13,7 +13,6 @@ export declare function textOf(blocks: unknown): string
 export declare function isReasoning(block: unknown): boolean
 
 /** Render the system-prompt section asking for a conclusion each step. */
-export declare function reasoningContract(): string
 
 /** Pick the text leaves of one tool-result message, with their positions. */
 export declare function textLeaves(message: unknown): Array<{ outer: number; index: number; text: string }>
@@ -25,10 +24,7 @@ export declare function renderHistoryRead(event: unknown, seq: number): { ok: bo
 export declare function renderToolCallRead(event: unknown, seq: number): { ok: boolean; text: string }
 
 /** Remove reasoning blocks from one projected message, or null when nothing else remains. */
-export declare function stripReasoning(message: unknown): unknown | null
 
-/** Apply {@link stripReasoning} across one projected message list. */
-export declare function stripReasoningFrom(messages: unknown): unknown
 
 /** Drop the raw material of steps that already have a summary. */
 export declare function dropSummarizedSteps(

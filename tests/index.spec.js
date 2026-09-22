@@ -1,7 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
   RECORDS_ROUTE,
-  REASONING_SECTION,
   apply,
   inject,
   name,
@@ -74,24 +73,18 @@ function record(key) {
 const CONFIG = resolveConfig({})
 
 describe('config', () => {
-  it('defaults to the conclusion contract on and step summary off', () => {
-    // Summary is off by default because it spends a request per step; the
-    // conclusion contract costs nothing and is on.
-    expect(CONFIG).toEqual({ reasoningContract: true, stepSummary: false, turnSummary: false, debug: false })
+  it('defaults every switch off', () => {
+    // Both summaries are off by default because each spends one request:
+    // step summary per step, turn summary per turn.
+    expect(CONFIG).toEqual({ stepSummary: false, turnSummary: false, debug: false })
   })
 
   it('accepts overrides and keeps every other default', () => {
     expect(resolveConfig({ stepSummary: true })).toEqual({
-      reasoningContract: true, stepSummary: true, turnSummary: false, debug: false,
+      stepSummary: true, turnSummary: false, debug: false,
     })
   })
 
-  it('lets the conclusion contract be switched off independently', () => {
-    // It is the part under measurement, so it has to be separable from the
-    // summary: otherwise a run cannot tell which instruction moved a number.
-    expect(resolveConfig({ reasoningContract: false }).reasoningContract).toBe(false)
-    expect(resolveConfig({ reasoningContract: false }).stepSummary).toBe(false)
-  })
 })
 
 describe('event reading', () => {
@@ -123,7 +116,7 @@ describe('migration notice', () => {
       logger: { info: vi.fn(), warn: vi.fn() },
     }
     apply(ctx, {})
-    expect(sections.map(section => section.name)).toEqual([REASONING_SECTION])
+      expect(sections).toEqual([])
   })
 })
 
@@ -152,7 +145,9 @@ describe('mounting', () => {
     expect(handlers.has('tools/post-execute')).toBe(false)
   })
 
-  it('survives a prompt service that rejects the section', () => {
+  it('survives a prompt service that rejects a section', () => {
+    // Nothing is registered with the prompt service any more, so the only
+    // claim left is that a hostile one cannot stop the plugin from loading.
     const ctx = {
       on: () => {},
       systemPrompt: { section: () => { throw new Error('duplicate section name') } },
@@ -160,9 +155,7 @@ describe('mounting', () => {
       logger: { info: vi.fn(), warn: vi.fn() },
     }
     expect(() => apply(ctx, {})).not.toThrow()
-    expect(ctx.logger.warn.mock.calls.flat().join('\n')).toContain('duplicate section')
   })
-
   it('declares the services cordis requires before property access', () => {
     // `agents` is not a convenience: `agent/pre-step` is dispatched through an
     // agent-scoped carrier, and a subscription registered before that service
@@ -303,70 +296,6 @@ describe('history_read', () => {
   })
 })
 
-describe('reasoning strip installation', () => {
-  /** Run one pre-step so the install path executes. */
-  async function step(agent, config = {}) {
-    const registered = []
-    const ctx = {
-      on: (event, handler) => registered.push([event, handler]),
-      systemPrompt: { section: () => {} },
-      inject: () => {},
-      logger: { info: vi.fn(), warn: vi.fn() },
-    }
-    apply(ctx, config)
-    const preStep = registered.find(([event]) => event === 'agent/pre-step')[1]
-    await preStep({ agent, turn: 1, step: 1 }, () => Promise.resolve({ kind: 'enter' }))
-    return ctx
-  }
-
-  it('strips reasoning from the session projection', async () => {
-    const session = {
-      deriveMessages: () => [
-        { role: 'user', content: [text('go')] },
-        { role: 'assistant', content: [reasoning('churn'), text('done')] },
-      ],
-    }
-    await step({ session })
-    expect(session.deriveMessages()).toEqual([
-      { role: 'user', content: [text('go')] },
-      { role: 'assistant', content: [text('done')] },
-    ])
-  })
-
-  it('leaves the projection alone when switched off', async () => {
-    const session = {
-      deriveMessages: () => [{ role: 'assistant', content: [reasoning('churn'), text('done')] }],
-    }
-    await step({ session }, { reasoningContract: false })
-    expect(session.deriveMessages()[0].content).toHaveLength(2)
-  })
-
-  it('wraps at most once across repeated steps', async () => {
-    // A wrapper per step would strip the same list N times and grow the call
-    // stack with the session's length.
-    const session = {
-      deriveMessages: () => [{ role: 'assistant', content: [reasoning('churn'), text('done')] }],
-    }
-    const registered = []
-    const ctx = {
-      on: (event, handler) => registered.push([event, handler]),
-      systemPrompt: { section: () => {} },
-      inject: () => {},
-      logger: { info: vi.fn(), warn: vi.fn() },
-    }
-    apply(ctx, {})
-    const preStep = registered.find(([event]) => event === 'agent/pre-step')[1]
-    for (let i = 0; i < 5; i += 1) {
-      await preStep({ agent: { session }, turn: 1, step: i + 1 }, () => Promise.resolve({ kind: 'enter' }))
-    }
-    expect(session.deriveMessages()).toEqual([{ role: 'assistant', content: [text('done')] }])
-  })
-
-  it('keeps working when the session has no projection to wrap', async () => {
-    await expect(step({})).resolves.toBeDefined()
-    await expect(step(undefined)).resolves.toBeDefined()
-  })
-})
 
 describe('summarize installation', () => {
   /**

@@ -42,7 +42,7 @@ already landed in a file. Re-sending its full text every turn buys nothing.
 
 ## How it works
 
-**1. Strip reasoning from the projection.**
+**1. Put the newest step's own material back into the projection.**
 
 `Session.deriveMessages()` is the single source of the message list -- the
 request is built from it, and the runtime invariant compares the request against
@@ -84,10 +84,6 @@ plus the newest step is all the next request carries. The log keeps everything.
 This is a trade, not a discount: it spends tokens and wall-clock time to keep a
 long conversation readable.
 
-**`reasoningContract: true` (on by default) puts a fixed section in the system
-prompt of every request.** The section is about 770 characters (roughly 200
-tokens) on every request of every turn, for the whole life of the session. It is
-a constant overhead, not a one-off. Set it to `false` to stop paying it.
 
 **`stepSummary: true` (off by default) sends one extra request per step, and
 that request carries the whole current context.** It is not a digest of the
@@ -115,7 +111,6 @@ problem, not before.
 ```yaml
 - id: stepwise-distill
   config:
-    reasoningContract: true   # ask for a written conclusion each step (default: true)
     stepSummary: false        # summarize each completed step (default: false)
     turnSummary: false        # write one note at the end of each turn (default: false)
     debug: false

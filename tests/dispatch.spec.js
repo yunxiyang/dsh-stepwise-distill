@@ -125,7 +125,7 @@ function mount(session, llm) {
       inject: (_services, callback) => callback({ llm }),
       logger: { info: () => {}, warn: () => {} },
     },
-    { stepSummary: true, reasoningContract: true },
+    { stepSummary: true },
   )
   const preStep = handlers.get('agent/pre-step')
   return key => preStep(

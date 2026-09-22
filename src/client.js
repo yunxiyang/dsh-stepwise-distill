@@ -35,6 +35,220 @@ window.__ModuleLoader__.load({
     // copy in `src/index.js`, and there is no module both halves import.
     const RECORDS_ROUTE = '/api/stepwise-distill/records'
 
+    // The same namespace the host half registers in `src/index.js`. The card
+    // claims it by this key, and the Host serves it under the same name, so the
+    // two spellings have to stay identical -- declared on both sides for the
+    // same reason as the route above.
+    const SETTINGS_NAMESPACE = 'stepwise-distill'
+    /** The three switches, in the order the card lists them. */
+    const SETTINGS_FIELDS = [
+      { key: 'stepSummary', label: '步间小结', hint: '每完成一步写一条记录，替换该步的原始材料。' },
+      { key: 'turnSummary', label: '轮间小结', hint: '每轮结束补充一条记录。' },
+      { key: 'debug', label: '调试日志', hint: '在日志里打印每次诊断。' },
+    ]
+
+    /**
+     * The card's own stylesheet.
+     *
+     * A contributed card inherits no styling from the settings section, so it
+     * has to bring its own -- measured against the built-in cards, which share
+     * this shape: a bordered row, a title over a one-line summary, and a
+     * chevron that rotates rather than changing glyph.
+     *
+     * Only the colour variables are taken from the host; spacing, radii and
+     * font sizes are spelled out here, because the aliases carry no layout.
+     */
+    const CARD_CSS = `
+.dshDistillCard {
+  border: 0.5px solid var(--dsw-alias-border-l4);
+  background: var(--dsw-alias-bg-layer-3);
+  border-radius: 16px;
+  list-style: none;
+  transition: border-color 0.16s, background 0.16s;
+}
+.dshDistillCard:hover { border-color: var(--dsw-alias-label-dimmed); }
+.dshDistillCardOpen {
+  background: var(--dsw-alias-bg-layer-2);
+  border-color: var(--dsw-alias-label-dimmed);
+}
+.dshDistillHeader {
+  appearance: none;
+  width: 100%;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  background: none;
+  border: 0;
+  border-radius: 12px;
+  padding: 14px 16px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.dshDistillHeader:focus-visible {
+  outline: 2px solid var(--dsw-alias-brand-primary);
+  outline-offset: -2px;
+}
+.dshDistillHeadText {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  gap: 4px;
+  min-width: 0;
+}
+.dshDistillTitle {
+  color: var(--dsw-alias-label-primary);
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+.dshDistillDescription {
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 13px;
+  line-height: 1.5;
+}
+.dshDistillChevron {
+  flex: none;
+  color: var(--dsw-alias-label-tertiary);
+  transition: transform 0.16s;
+}
+.dshDistillChevronOpen { transform: rotate(180deg); }
+.dshDistillBody {
+  border-top: 0.5px solid var(--dsw-alias-border-l2);
+  margin: 0 16px;
+  padding: 14px 0 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.dshDistillRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.dshDistillLabel {
+  color: var(--dsw-alias-label-primary);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.dshDistillHint {
+  margin: 0;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+`
+
+    /**
+     * Put the card's stylesheet in the document once.
+     *
+     * Idempotent by tag lookup, so a remount does not stack copies, and the
+     * disposer removes only the tag this call created.
+     */
+    function installStyles() {
+      const existing = document.querySelector('style[data-plugin-css="dsh-stepwise-distill/card.css"]')
+      if (existing !== null) return () => {}
+      const tag = document.createElement('style')
+      tag.dataset.plugin = PLUGIN_ID
+      tag.dataset.pluginCss = `${PLUGIN_ID}/card.css`
+      tag.textContent = CARD_CSS
+      document.head.appendChild(tag)
+      return () => { tag.remove() }
+    }
+
+    /**
+     * The card under `Settings > Plugins`.
+     *
+     * It edits the switches the host serves under `SETTINGS_NAMESPACE`, so it
+     * owns no state of its own: it renders the scope's snapshot and writes back
+     * through it. Claiming the namespace is what puts the card in the list, and
+     * the fields it shows are the fields the host schema declares -- a switch
+     * for anything else would be rejected on write.
+     *
+     * Collapsed by default, like the built-in plugin cards: the list is a column
+     * of one-line summaries, and an expanded card would push the rest off it.
+     */
+    function SettingsCard(props) {
+      const scope = props?.scope
+      const [snapshot, setSnapshot] = useState(() => scope?.getSnapshot?.() ?? {})
+      const [open, setOpen] = useState(false)
+
+      useEffect(() => {
+        if (typeof scope?.subscribe !== 'function') return undefined
+        return scope.subscribe(() => { setSnapshot(scope.getSnapshot()) })
+      }, [scope])
+
+      const value = snapshot?.value ?? {}
+      const writable = snapshot?.writable === true
+
+      return createElement('li', {
+        className: `dshDistillCard${open ? ' dshDistillCardOpen' : ''}`,
+      }, [
+        createElement('button', {
+          key: 'header',
+          type: 'button',
+          className: 'dshDistillHeader',
+          'aria-expanded': open,
+          onClick: () => { setOpen(!open) },
+        }, [
+          createElement('span', { key: 'head', className: 'dshDistillHeadText' }, [
+            createElement('span', { key: 'title', className: 'dshDistillTitle' }, '蒸馏'),
+            createElement('span', { key: 'summary', className: 'dshDistillDescription' },
+              SETTINGS_FIELDS.filter((field) => value[field.key] === true).map((field) => field.label).join('、') || '全部关闭'),
+          ]),
+          createElement('svg', {
+            key: 'chevron',
+            className: `dshDistillChevron${open ? ' dshDistillChevronOpen' : ''}`,
+            width: 14,
+            height: 14,
+            viewBox: '0 0 14 14',
+            fill: 'none',
+            'aria-hidden': true,
+          }, createElement('path', {
+            d: 'M3.5 5.25 7 8.75l3.5-3.5',
+            stroke: 'currentColor',
+            strokeWidth: 1.5,
+            strokeLinecap: 'round',
+            strokeLinejoin: 'round',
+          })),
+        ]),
+        open && createElement('div', {
+          key: 'body',
+          className: 'dshDistillBody',
+        }, [
+          writable ? null : createElement('div', {
+            key: 'readonly',
+            className: 'dshDistillDescription',
+            role: 'status',
+          }, '当前设置不可写，以下开关为只读。'),
+          ...SETTINGS_FIELDS.map((field) => createElement('div', {
+            key: field.key,
+            className: 'dshDistillRow',
+          }, [
+            createElement('div', { key: 'text' }, [
+              createElement('label', {
+                key: 'label',
+                className: 'dshDistillLabel',
+                htmlFor: `dsh-distill-${field.key}`,
+              }, field.label),
+              createElement('p', { key: 'hint', className: 'dshDistillHint' }, field.hint),
+            ]),
+            createElement('input', {
+              key: 'input',
+              id: `dsh-distill-${field.key}`,
+              type: 'checkbox',
+              checked: value[field.key] === true,
+              disabled: !writable,
+              onChange: () => { void scope.set(field.key, value[field.key] !== true) },
+            }),
+          ])),
+        ]),
+      ])
+    }
+
     /**
      * The tab body.
      *
@@ -265,6 +479,10 @@ window.__ModuleLoader__.load({
     }
 
     function apply(ctx) {
+      // The card carries its own stylesheet, so this is registered before the
+      // card can possibly render.
+      ctx.effect(() => installStyles(), `${PLUGIN_ID}: settings card styles`)
+
       ctx.inject(['sidebarRightTabs'], (injected) => {
         const tabs = injected.sidebarRightTabs
         if (tabs === undefined || typeof tabs.register !== 'function') return
@@ -317,11 +535,25 @@ window.__ModuleLoader__.load({
         }
         return release
       })
+
+      // A second injection alongside the tab's: the card needs `settingsScope`,
+      // which the tab's own scope does not carry. Registered on the namespace
+      // rather than in storage of its own -- the settings tab dispatches its
+      // cards by namespace, so claiming this key is what makes the card appear.
+      ctx.inject(['slots', 'settingsScope'], (scoped) => {
+        const scope = scoped.settingsScope.bind({ namespace: SETTINGS_NAMESPACE })
+        scoped.slots.inject('settings.plugin.item', () => scoped.slots.register({
+          name: 'settings.plugin.item',
+          key: SETTINGS_NAMESPACE,
+        }, () => createElement(SettingsCard, { scope })))
+      })
     }
 
     // `sessions` is declared because the panel subscribes to the session's
-    // event source. The host rejects an undeclared service, so a plain function
-    // plugin would have no way to reach it.
-    return { apply, name: PLUGIN_ID, inject: ['slots', 'sessions'] }
+    // event source. `settingsScope` is declared for the settings card, which
+    // edits the switches the host serves under SETTINGS_NAMESPACE. The host
+    // rejects an undeclared service, so a plain function plugin would have no
+    // way to reach either.
+    return { apply, name: PLUGIN_ID, inject: ['slots', 'sessions', 'settingsScope'] }
   },
 })

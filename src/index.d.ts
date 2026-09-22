@@ -36,26 +36,23 @@ export declare const REASONING_STRIPPED: symbol
 /** Non-enumerable marker recording which `turn/step` pairs have a summary. */
 export declare const SUMMARIZED_STEPS: symbol
 
-/** Prompt section name carrying the written-conclusion instructions. */
-export declare const REASONING_SECTION: 'stepwise-distill:reasoning'
 
-/** Sort order placing the conclusion instructions after the host's own notes. */
-export declare const REASONING_SECTION_ORDER: 10250
 
 /** Plugin config, as the loader or the Settings section supplies it. */
 export interface PluginConfig {
   /** Ask the model to write a conclusion into its reply at the end of each step. */
-  reasoningContract?: boolean
   /** Ask for a step summary and hold the step's raw material out of later turns. */
   stepSummary?: boolean
+  /** Append a record at the end of every turn, in addition to the step records. */
+  turnSummary?: boolean
   /** Emit a diagnostic line for every evaluation. */
   debug?: boolean
 }
 
 /** Plugin config with every default applied. */
 export interface ResolvedConfig {
-  reasoningContract: boolean
   stepSummary: boolean
+  turnSummary: boolean
   debug: boolean
 }
 
