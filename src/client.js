@@ -19,6 +19,14 @@
  * passes to `renderSlot`.
  */
 
+// Which sessions have already had their newest turn record opened, and with
+// which id. A tab is remounted before the injected fiber re-fires, and a
+// remount resets every ref inside the component -- so this has to live out
+// here, where the factory's own call does not rebuild it, or the mounting
+// effect cannot tell "the reader just arrived" from "the reader closed the
+// panel and it came back".
+const openedSessions = new Map()
+
 window.__ModuleLoader__.load({
   id: 'dsh-stepwise-distill',
   factory: (require) => {
@@ -313,6 +321,12 @@ window.__ModuleLoader__.load({
           const newest = next.find((item) => item?.kind === 'turn')
           if (newest === undefined) return
           if (typeof newest.turn === 'number') lastTurn.current = newest.turn
+          // Opening is a one-time arrival gesture. Once this session has been
+          // opened -- whether here or by the subscribe effect -- a later mount
+          // only catches up on the list; it does not open anything again, or a
+          // panel the reader closed would be forced back open every remount.
+          if (openedSessions.has(sessionId)) return
+          openedSessions.set(sessionId, newest.id ?? null)
           setOpenId(newest.id ?? null)
         })
         return undefined
@@ -354,6 +368,7 @@ window.__ModuleLoader__.load({
             if (typeof newest.turn !== 'number') return
             if (newest.turn <= (lastTurn.current ?? -1)) return
             lastTurn.current = newest.turn
+            openedSessions.set(sessionId, newest.id ?? null)
             setOpenId(newest.id ?? null)
           })
         })
