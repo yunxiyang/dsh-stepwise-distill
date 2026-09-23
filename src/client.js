@@ -27,6 +27,24 @@
 // panel and it came back".
 const openedSessions = new Map()
 
+// Whether the host's right-hand panel is currently open. The panel is a CSS
+// transition -- its stylesheet moves it off the right edge and sets
+// `visibility: hidden` for as long as `data-sidebar-right-open` is absent -- so
+// the attribute the shell sets on the element is the same one the stylesheet
+// switches on. The panel element stays in the DOM while collapsed, which is
+// what makes this readable at all.
+//
+// Unreadable means "assume open": a missing element must not turn into a
+// plugin that never opens anything. The floating presentation is a portal into
+// `document.body`, so it is looked up next to the docked panel.
+function sidebarPanelOpen() {
+  const panel = document.querySelector('[data-sidebar-right-panel]')
+  if (panel !== null) return panel.hasAttribute('data-sidebar-right-open')
+  const floats = document.querySelector('[data-sidebar-right-float-host]')
+  if (floats !== null) return true
+  return true
+}
+
 window.__ModuleLoader__.load({
   id: 'dsh-stepwise-distill',
   factory: (require) => {
@@ -314,6 +332,11 @@ window.__ModuleLoader__.load({
         // reply from landing on a newer render's state; `read` itself is shared
         // with the subscribe effect, which has its own cancelled flag.
         if (sessionId === '') { setRecords([]); return undefined }
+        // A collapsed panel is not a place to open anything, and the reader who
+        // closed it should not have it come back at the end of the next turn.
+        // There is nothing to catch up on: the effect runs again when the panel
+        // is opened.
+        if (!sidebarPanelOpen()) return undefined
         // Open the newest turn record on arrival, so the panel is not a list of
         // collapsed rows the reader has to guess from. The list comes back
         // newest first, so the first turn record is the one to open.
@@ -348,6 +371,11 @@ window.__ModuleLoader__.load({
         let cancelled = false
         const unsubscribe = source.subscribe(() => {
           if (cancelled) return
+          // Same reason as in the mounting effect: while the panel is closed,
+          // rewriting which record is open is a state change the reader never
+          // asked for, and it re-renders the whole tab body underneath the
+          // panel's own open/close transition.
+          if (!sidebarPanelOpen()) return
           const change = source.getSnapshot?.()?.change
           // `settle-assistant` closes an attempt and carries no entries; only an
           // append means the log moved, which is when a record can have landed.
