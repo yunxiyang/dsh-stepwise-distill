@@ -720,16 +720,16 @@ function requestTimings(session, events) {
     }
     // The plugin's own summary call. The host never logs it as a request of
     // its own, so its figures live on the record it wrote -- and they are the
-    // ones this step cost, not the model call it replaced. Read them here so
-    // the record's numbers win over the message's.
+    // ones this step cost, not the model call it replaced. A step is timed
+    // only from here: a record written before the figures were captured
+    // carries none, and that step reports nothing rather than falling back to
+    // the call it replaced, which measures something else entirely.
     if (event?.type === 'user/message') {
       const source = event?.data?.source
       if (source?.plugin !== name) continue
       const covers = event?.data?.summaryOf
-      const timing = event?.data?.timing
-      if (timing === undefined || timing === null) continue
       if (typeof covers?.turn !== 'number' || typeof covers?.step !== 'number') continue
-      timings.set(`${covers.turn}/${covers.step}`, timing)
+      timings.set(`${covers.turn}/${covers.step}`, event?.data?.timing ?? null)
       continue
     }
     if (event?.type !== 'assistant/message') continue
@@ -738,12 +738,8 @@ function requestTimings(session, events) {
     const startedAt = requestAt
     requestAt = null
     if (typeof turn !== 'number' || typeof step !== 'number') continue
-    // A step the plugin summarized already carries that call's figures; the
-    // message behind it must not overwrite them.
-    if (timings.has(`${turn}/${step}`)) continue
     const timing = timingOf(event, startedAt)
     if (timing === undefined) continue
-    timings.set(`${turn}/${step}`, timing)
     // A turn record has no step of its own, so its key would carry `undefined`
     // and never match. The turn's figures are its last step's -- the step that
     // produced the turn's closing message -- so this entry is overwritten as
