@@ -926,30 +926,63 @@ function byteLength(text) {
 }
 
 /**
- * How large the session's context is right now, in bytes.
+ * Roughly how many tokens the session's context holds right now.
  *
- * Read from the projection, like the records themselves: the context is what
- * the session would send if it were asked to continue, so it is the projection
- * that answers it -- not the log, which still holds everything a replacement
- * took out.
+ * Read from the projection: the context is what the session would send if it
+ * were asked to continue, so the projection is what answers it -- not the log,
+ * which still holds everything a replacement took out. The projection is also
+ * the list the agent loop builds its requests from, so this counts the same
+ * messages the model is sent.
  *
- * The count is over the message bodies and nothing else: roles, ids and the
- * request envelope are the host's business, and a number that moved every time
- * the host changed its framing would be worse than no number.
+ * Counted in tokens rather than bytes because the two disagree by a factor
+ * that depends on the language: the host's own meter estimates CJK at about
+ * three bytes per token and everything else at about four characters per
+ * token, and the panel sits next to numbers the host reports in tokens.
+ *
+ * An estimate, not a measurement: it is the panel's own reading of the
+ * projection rather than the usage the provider reports, so it will not match
+ * a billed count to the digit.
  *
  * @param session - the running session.
- * @returns the total UTF-8 byte length of every projected message's content.
+ * @returns an estimated token count for every projected message's text.
  */
-function contextBytes(session) {
+function contextTokens(session) {
   if (typeof session?.deriveMessages !== 'function') return 0
   let total = 0
   for (const data of session.deriveMessages()) {
     if (!Array.isArray(data?.content)) continue
     for (const part of data.content) {
-      if (part?.type === 'text' && typeof part.text === 'string') total += byteLength(part.text)
+      if (part?.type === 'text' && typeof part.text === 'string') total += estimateTokens(part.text)
     }
   }
   return total
+}
+
+/**
+ * Estimate the token count of one piece of text.
+ *
+ * CJK characters carry far more per token than latin ones do, so a single
+ * bytes-per-token divisor cannot serve both: counting CJK by bytes and the
+ * rest by characters keeps a mostly-Chinese panel from reading several times
+ * too large, which is exactly what dividing the byte total by one constant did.
+ *
+ * @param text - the text to estimate.
+ * @returns an estimated token count, never below zero.
+ */
+function estimateTokens(text) {
+  const value = String(text ?? '')
+  let cjk = 0
+  for (const character of value) {
+    const code = character.codePointAt(0)
+    const wide = (code >= 0x3000 && code <= 0x303f)
+      || (code >= 0x3400 && code <= 0x4dbf)
+      || (code >= 0x4e00 && code <= 0x9fff)
+      || (code >= 0xf900 && code <= 0xfaff)
+      || (code >= 0xff00 && code <= 0xffef)
+    if (wide) cjk += 1
+  }
+  const rest = [...value].length - cjk
+  return Math.ceil(cjk * 3 / 3 + rest / 4)
 }
 
 
@@ -1011,7 +1044,7 @@ export function installRecordsRoute(ctx) {
             return json({
               ok: true,
               value: retentionRecords(session, timings),
-              context: contextBytes(session),
+              context: contextTokens(session),
             })
           } catch (error) {
             return json({ ok: false, error: String(error?.message ?? error) }, 500)
