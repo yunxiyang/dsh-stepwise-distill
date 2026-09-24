@@ -97,6 +97,16 @@ export const optionalInject = ['commands', 'tools', 'llm', 'connection']
 export const UNKNOWN_TOOL = '<unknown>'
 
 /**
+ * Source plugin of the host's compaction checkpoint messages.
+ *
+ * The host writes a compaction summary back as a `user/message` whose source
+ * carries this marker -- `{ kind: 'plugin', plugin: 'compact' }` -- replacing
+ * the history it covers. The tab lists those alongside its own records, so it
+ * has to name them without depending on the host plugin being loaded.
+ */
+export const COMPACT_PLUGIN = 'compact'
+
+/**
  * Non-enumerable marker recording that this session's projection is wrapped.
  *
  * Stored on the session rather than in module scope because sessions outlive
@@ -696,9 +706,29 @@ function retentionRecords(session) {
   if (typeof session?.deriveMessages !== 'function') return []
   const records = []
   for (const data of session.deriveMessages()) {
-    if (data?.source?.plugin !== name) continue
+    if (data?.source?.plugin === COMPACT_PLUGIN) {
+      // Handled below, before the plugin gate, so the checkpoint is not
+      // discarded by a filter that exists to keep other plugins out.
+    } else if (data?.source?.plugin !== name) continue
     const text = textOfMessage(data)
     if (text.length === 0) continue
+    // A compaction checkpoint is a host message, not one of this plugin's
+    // records: the host writes the summary back as a `user/message` whose
+    // source carries the `compact` marker, replacing the history it covers.
+    // It is listed for the same reason the records are -- it is what the
+    // context holds now -- and it sits outside the turn/step ordering because
+    // it covers a span, not a step.
+    if (data?.source?.plugin === COMPACT_PLUGIN) {
+      records.push({
+        id: `compact-${String(data.source.compactionId ?? records.length)}`,
+        kind: 'compact',
+        text,
+        turn: null,
+        step: null,
+      })
+      continue
+    }
+    if (data?.source?.plugin !== name) continue
     const isTurn = typeof data.summaryOfTurn === 'number'
     const step = data.summaryOf
     const turn = isTurn ? data.summaryOfTurn : (typeof step?.turn === 'number' ? step.turn : null)

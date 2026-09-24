@@ -977,6 +977,16 @@ describe('records route', () => {
     return data
   }
 
+  // A compaction checkpoint as the host writes it: a `user/message` whose
+  // source carries the `compact` marker, produced by `compactCheckpointSource`
+  // and appended in place of the history it covers.
+  function checkpoint({ id = 'c1', body = 'the compacted history' } = {}) {
+    return {
+      source: { kind: 'plugin', plugin: 'compact', compactionId: id },
+      content: [{ type: 'text', text: body }],
+    }
+  }
+
   it('registers the route on the connection it is given', () => {
     const { registered } = mountRoute({})
     expect(registered.path).toBe(RECORDS_ROUTE)
@@ -1056,6 +1066,45 @@ describe('records route', () => {
     const response = await post(registered, { sessionId: 's1' })
     expect(response.status).toBe(200)
     expect(await response.json()).toEqual({ ok: true, value: [] })
+  })
+
+  it('lists a compaction checkpoint as its own kind, without a turn or step', async () => {
+    const session = sessionOf([
+      record({ kind: 'step', turn: 4, step: 1, text: 'a step' }),
+      checkpoint({ id: 'c-9', body: 'what the compaction kept' }),
+    ])
+    const { registered } = mountRoute({ sessions: { get: () => session } })
+    const payload = await (await post(registered, { sessionId: 's1' })).json()
+    expect(payload.value).toHaveLength(2)
+    // The checkpoint covers a span of history, not a step, so it carries no
+    // turn or step for the client to sort or label it by.
+    expect(payload.value[1]).toEqual({
+      id: 'compact-c-9',
+      kind: 'compact',
+      text: 'what the compaction kept',
+      turn: null,
+      step: null,
+    })
+  })
+
+  it('keeps a checkpoint behind every turn record', async () => {
+    const session = sessionOf([
+      record({ kind: 'turn', turn: 1, text: 'a turn' }),
+      checkpoint({ body: 'older than the turn record above' }),
+    ])
+    const { registered } = mountRoute({ sessions: { get: () => session } })
+    const payload = await (await post(registered, { sessionId: 's1' })).json()
+    // The client renders the order it is given and puts the checkpoint last in
+    // its own section; leaving it ahead of a turn record here would make the
+    // panel show compressed history above the note about turn 1.
+    expect(payload.value.map((item) => item.kind)).toEqual(['turn', 'compact'])
+  })
+
+  it('drops a checkpoint with no text, like any other empty record', async () => {
+    const session = sessionOf([checkpoint({ body: '' })])
+    const { registered } = mountRoute({ sessions: { get: () => session } })
+    const payload = await (await post(registered, { sessionId: 's1' })).json()
+    expect(payload.value).toEqual([])
   })
 
   it('loads without a connection to register the route on', () => {

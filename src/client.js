@@ -406,7 +406,12 @@ window.__ModuleLoader__.load({
       const loading = records === null && error === null
       const list = records ?? []
       const turns = list.filter((item) => item?.kind === 'turn')
-      const steps = list.filter((item) => item?.kind !== 'turn')
+      const steps = list.filter((item) => item?.kind === 'step')
+      // The host's compaction checkpoints. Their own group, and last: they
+      // cover a span of history rather than a step, so they belong to neither
+      // list above, and they are the oldest thing in the panel by nature --
+      // everything else was written after the history they replaced.
+      const compacts = list.filter((item) => item?.kind === 'compact')
 
       return createElement('div', {
         className: 'dsh-stepwise-distill',
@@ -430,6 +435,8 @@ window.__ModuleLoader__.load({
         }, '本次会话还没有记录。'),
         section('轮间记录', turns, 'turn', openId, setOpenId),
         section('步间记录', steps, 'step', openId, setOpenId),
+        // Renders nothing at all when the session has never been compacted.
+        section('压缩内容', compacts, 'compact', openId, setOpenId),
       ])
     }
 
@@ -526,6 +533,7 @@ window.__ModuleLoader__.load({
 
     /** Where a record belongs, as far as the record itself says. */
     function where(item) {
+      if (item?.kind === 'compact') return '压缩'
       if (item?.kind === 'turn') return `turn ${item.turn ?? '?'}`
       if (item?.turn === null || item?.turn === undefined) return '本轮的记录'
       return `turn ${item.turn}, step ${item.step ?? '?'}`
