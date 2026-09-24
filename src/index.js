@@ -670,44 +670,6 @@ function recordsOf(session) {
   return records
 }
 
-/**
- * Every compaction checkpoint the log has ever written, oldest first.
- *
- * Read from the log rather than the projection on purpose. The host writes a
- * checkpoint as a `user/message` that *replaces* the history it covers, so the
- * next compaction replaces the previous checkpoint in turn: the projection
- * keeps only the newest one, and a reader who compacted three times sees a
- * single fold. The log keeps them all, which is what a panel about compression
- * has to show.
- *
- * This is the one place the tab deliberately reads past the projection. The
- * records above are what the context holds now; a checkpoint is a landmark in
- * how the context got that way, and the earlier ones are exactly the ones that
- * are otherwise invisible.
- *
- * Never calls `session.deriveMessages()`: that method is wrapped by
- * {@link installProjectionRestore}, and asking it from here would recurse into
- * the wrapper.
- *
- * @param session - the running session.
- * @returns `user/message` bodies, oldest first, one per compaction.
- */
-function compactionCheckpoints(session) {
-  const seen = new Set()
-  const found = []
-  for (const event of readEvents(session)) {
-    if (event?.type !== 'user/message') continue
-    const source = event?.data?.source
-    if (source?.plugin !== COMPACT_PLUGIN) continue
-    const id = typeof source.compactionId === 'string' ? source.compactionId : ''
-    if (seen.has(id)) continue
-    seen.add(id)
-    const message = deriveEventMessage(event)
-    if (message === null || message === undefined) continue
-    found.push(message)
-  }
-  return found
-}
 
 /**
  * Every retention record the model can currently see, both kinds.
@@ -744,7 +706,7 @@ function compactionCheckpoints(session) {
 function retentionRecords(session) {
   if (typeof session?.deriveMessages !== 'function') return []
   const records = []
-  for (const data of [...session.deriveMessages(), ...compactionCheckpoints(session)]) {
+  for (const data of session.deriveMessages()) {
     if (data?.source?.plugin === COMPACT_PLUGIN) {
       // Handled below, before the plugin gate, so the checkpoint is not
       // discarded by a filter that exists to keep other plugins out.
@@ -780,15 +742,7 @@ function retentionRecords(session) {
       step: within,
     })
   }
-  // One entry per id. A checkpoint can be answered twice over: the projection
-  // carries it while it is the newest compaction, and the log still carries
-  // the event it was derived from. The projection's copy comes first in the
-  // concatenation above, so it is the one kept -- it is the copy the model is
-  // reading. Two entries with the same id would collide in the client, which
-  // keys each row by it.
-  const byId = new Map()
-  for (const record of records) if (!byId.has(record.id)) byId.set(record.id, record)
-  return [...byId.values()].sort((a, b) => {
+  return records.sort((a, b) => {
     const turn = (b.turn ?? 0) - (a.turn ?? 0)
     if (turn !== 0) return turn
     // A turn record has no step of its own: it covers the whole turn, so it
