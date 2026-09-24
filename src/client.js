@@ -429,7 +429,7 @@ window.__ModuleLoader__.load({
           key: 'title',
           style: { fontWeight: 600, marginBottom: '6px' },
         }, [
-          formatSize(contextBytes),
+          formatTokens(contextBytes),
           formatSeconds(averageOf(list, 'ttft')),
           formatRate(averageOf(list, 'thinkRate')),
           formatRate(averageOf(list, 'textRate')),
@@ -556,6 +556,21 @@ window.__ModuleLoader__.load({
       if (typeof bytes !== 'number' || !Number.isFinite(bytes)) return ''
       if (bytes < 1024) return `${bytes} B`
       const value = (bytes / 1024).toFixed(2).replace(/\.?0+$/, '')
+      return `${value} K`
+    }
+
+    /**
+     * The context's weight, in tokens.
+     *
+     * Not `formatSize`: that one is for record sizes in bytes and divides by
+     * 1024. Tokens are counted in thousands -- the host reports the context as
+     * `449.36K` for 449360 tokens -- and the two numbers sit side by side on
+     * the title line, so they must not be read with each other's scale.
+     */
+    function formatTokens(count) {
+      if (typeof count !== 'number' || !Number.isFinite(count) || count <= 0) return ''
+      if (count < 1000) return `${count}`
+      const value = (count / 1000).toFixed(2).replace(/\.?0+$/, '')
       return `${value} K`
     }
 
