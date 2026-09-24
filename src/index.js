@@ -742,7 +742,7 @@ function retentionRecords(session) {
       step: within,
     })
   }
-  return records.sort((a, b) => {
+  return records.map(record => ({ ...record, size: byteLength(record.text) })).sort((a, b) => {
     const turn = (b.turn ?? 0) - (a.turn ?? 0)
     if (turn !== 0) return turn
     // A turn record has no step of its own: it covers the whole turn, so it
@@ -751,6 +751,47 @@ function retentionRecords(session) {
     if (a.kind !== b.kind) return a.kind === 'turn' ? -1 : 1
     return (b.step ?? 0) - (a.step ?? 0)
   })
+}
+
+/**
+ * How large one record's text is, in bytes.
+ *
+ * Bytes rather than characters: the number is meant to be read next to the
+ * context total, which is a byte count of what the request carries. Counting
+ * UTF-16 code units would make a Chinese summary look half its real weight.
+ *
+ * @param text - the record's plain text.
+ * @returns its UTF-8 length in bytes.
+ */
+function byteLength(text) {
+  return Buffer.byteLength(String(text ?? ''), 'utf8')
+}
+
+/**
+ * How large the session's context is right now, in bytes.
+ *
+ * Read from the projection, like the records themselves: the context is what
+ * the session would send if it were asked to continue, so it is the projection
+ * that answers it -- not the log, which still holds everything a replacement
+ * took out.
+ *
+ * The count is over the message bodies and nothing else: roles, ids and the
+ * request envelope are the host's business, and a number that moved every time
+ * the host changed its framing would be worse than no number.
+ *
+ * @param session - the running session.
+ * @returns the total UTF-8 byte length of every projected message's content.
+ */
+function contextBytes(session) {
+  if (typeof session?.deriveMessages !== 'function') return 0
+  let total = 0
+  for (const data of session.deriveMessages()) {
+    if (!Array.isArray(data?.content)) continue
+    for (const part of data.content) {
+      if (part?.type === 'text' && typeof part.text === 'string') total += byteLength(part.text)
+    }
+  }
+  return total
 }
 
 /** The plain text of a message's content blocks, concatenated. */
@@ -803,8 +844,12 @@ export function installRecordsRoute(ctx) {
             const session = await sessionFor(ctx, sessionId)
             // No session is not a failure: the tab is opened per session and a
             // cold one simply has nothing to show yet.
-            if (session === undefined) return json({ ok: true, value: [] })
-            return json({ ok: true, value: retentionRecords(session) })
+            if (session === undefined) return json({ ok: true, value: [], context: null })
+            return json({
+              ok: true,
+              value: retentionRecords(session),
+              context: contextBytes(session),
+            })
           } catch (error) {
             return json({ ok: false, error: String(error?.message ?? error) }, 500)
           }

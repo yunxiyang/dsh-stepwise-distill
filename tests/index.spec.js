@@ -1008,7 +1008,9 @@ describe('records route', () => {
     // No session is not a failure: the tab is opened per session and a cold one
     // simply has nothing to show yet.
     expect(response.status).toBe(200)
-    expect(await response.json()).toEqual({ ok: true, value: [] })
+    // `context: null` for a cold session, not 0: the tab renders the number it
+    // is given, and a session the host never had has no weight to report.
+    expect(await response.json()).toEqual({ ok: true, value: [], context: null })
   })
 
   it('reads the records the model can see, newest first', async () => {
@@ -1066,7 +1068,7 @@ describe('records route', () => {
     })
     const response = await post(registered, { sessionId: 's1' })
     expect(response.status).toBe(200)
-    expect(await response.json()).toEqual({ ok: true, value: [] })
+    expect(await response.json()).toEqual({ ok: true, value: [], context: null })
   })
 
   it('lists a compaction checkpoint as its own kind, without a turn or step', async () => {
@@ -1078,13 +1080,15 @@ describe('records route', () => {
     const payload = await (await post(registered, { sessionId: 's1' })).json()
     expect(payload.value).toHaveLength(2)
     // The checkpoint covers a span of history, not a step, so it carries no
-    // turn or step for the client to sort or label it by.
+    // turn or step for the client to sort or label it by. The size is the
+    // record's own text in bytes, which is the number the row shows.
     expect(payload.value[1]).toEqual({
       id: 'compact-c-9',
       kind: 'compact',
       text: 'what the compaction kept',
       turn: null,
       step: null,
+      size: 24,
     })
   })
 

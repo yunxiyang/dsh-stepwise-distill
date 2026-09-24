@@ -287,6 +287,11 @@ window.__ModuleLoader__.load({
       const sessionId = typeof props?.sessionId === 'string' ? props.sessionId : ''
       const [records, setRecords] = useState(null)
       const [error, setError] = useState(null)
+      // How much the whole context weighs, not the sum of the records listed
+      // below: user messages, tool results and the system prompt are in the
+      // request but never appear in the list. `null` until the first answer,
+      // and for a session the host has nothing for.
+      const [contextBytes, setContextBytes] = useState(null)
       // One open body at a time. The bodies are long enough that several open
       // at once would push every later record off the panel, which defeats the
       // reason for opening one. Keyed by the id the record derives from the
@@ -319,6 +324,7 @@ window.__ModuleLoader__.load({
           if (payload?.ok !== true) throw new Error('records read failed')
           const value = Array.isArray(payload.value) ? payload.value : []
           setRecords(value)
+          setContextBytes(typeof payload.context === 'number' ? payload.context : null)
           return value
         } catch (failure) {
           setError(String(failure?.message ?? failure))
@@ -417,10 +423,12 @@ window.__ModuleLoader__.load({
         className: 'dsh-stepwise-distill',
         style: { padding: '12px', font: '12px/1.6 system-ui, sans-serif' },
       }, [
+        // The panel shows what the context weighs instead of repeating the
+        // tab's own name, which is already on the tab strip above.
         createElement('div', {
           key: 'title',
           style: { fontWeight: 600, marginBottom: '6px' },
-        }, '蒸馏'),
+        }, formatSize(contextBytes)),
         error !== null && createElement('div', {
           key: 'error',
           style: { color: '#c0392b' },
@@ -473,7 +481,7 @@ window.__ModuleLoader__.load({
           const open = openId !== null && id === openId
           return createElement(RecordEntry, {
             key: `entry-${kind}-${id}`,
-            label: where(item),
+            label: sizeLabel(item),
             text: String(item?.text ?? ''),
             open,
             onToggle: () => setOpenId(open ? null : id),
@@ -531,12 +539,34 @@ window.__ModuleLoader__.load({
       ])
     }
 
+    /**
+     * A byte count as it is shown next to a label.
+     *
+     * Bytes below a kilobyte are exact: a step summary of a few hundred bytes
+     * reads better as `420B` than as `0.41K`. Above it the unit is K with two
+     * decimals and no trailing zeros -- `1K`, not `1.00K`, because the scale is
+     * there to size a list at a glance and the zeros are noise.
+     */
+    function formatSize(bytes) {
+      if (typeof bytes !== 'number' || !Number.isFinite(bytes)) return ''
+      if (bytes < 1024) return `${bytes}B`
+      const value = (bytes / 1024).toFixed(2).replace(/\.?0+$/, '')
+      return `${value}K`
+    }
+
     /** Where a record belongs, as far as the record itself says. */
     function where(item) {
       if (item?.kind === 'compact') return '压缩'
       if (item?.kind === 'turn') return `turn ${item.turn ?? '?'}`
       if (item?.turn === null || item?.turn === undefined) return '本轮的记录'
       return `turn ${item.turn}, step ${item.step ?? '?'}`
+    }
+
+    /** A record's row label: where it belongs, and how big it is. */
+    function sizeLabel(item) {
+      const size = formatSize(item?.size)
+      const where_ = where(item)
+      return size === '' ? where_ : `${where_} ${size}`
     }
 
     /** The label shown on the tab strip, and in the panel's guide list. */
