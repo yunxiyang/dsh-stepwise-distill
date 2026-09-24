@@ -771,7 +771,10 @@ function timingOf(event, startedAt) {
   const stream = event?.data?.stream
   if (usage === undefined || usage === null || !Array.isArray(stream)) return undefined
   const tokens = typeof usage === 'object' ? usage : parseUsage(usage)
-  if (tokens === undefined) return undefined
+  // An object with no token field in it is not a measurement. Recording one
+  // would let a request whose usage never arrived report the speed of nothing,
+  // which reads on the panel exactly like a request that was measured.
+  if (!hasTokenCount(tokens)) return undefined
 
   let first = null
   let reasoningEnd = null
@@ -839,6 +842,13 @@ function parseUsage(usage) {
 /** A number, or the fallback when the value is missing or not a number. */
 function numberOr(value, fallback) {
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback
+}
+
+/** Whether a usage object reports at least one token count. */
+function hasTokenCount(usage) {
+  if (usage === null || typeof usage !== 'object') return false
+  for (const value of Object.values(usage)) if (typeof value === 'number' && Number.isFinite(value)) return true
+  return false
 }
 
 /**
@@ -1249,10 +1259,10 @@ async function requestSummary(llm, config, messages, signal) {
  * @returns the newest usage known, or current when this chunk reported none.
  */
 function usageFromChunk(element, current) {
-  // Usage arrives as a stream element of its own with the figure on top of
-  // it, which is what the provider adapter yields. The nested field is only
-  // a fallback for streams that wrap their chunks.
-  const parsed = parseUsage(element?.usage ?? element?.chunk?.usage)
+  // Stream elements are wrappers -- `{ type, time, chunk }` -- and the usage
+  // element carries its figures on the inner `chunk`. The top-level field is
+  // only a fallback for streams that deliver the block unwrapped.
+  const parsed = parseUsage(element?.chunk?.usage ?? element?.usage)
   if (parsed === undefined) return current
   // Copied field by field, not carried over: the host's own usage object does
   // not survive `JSON.stringify` unchanged, and `session.append` rejects a
