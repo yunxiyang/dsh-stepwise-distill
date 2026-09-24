@@ -708,11 +708,12 @@ function recordsOf(session) {
  * @returns a Map from `turn/step` to `{ ttft, thinkMs, thinkRate, textMs, textRate }`,
  * with `null` for any figure the log does not support.
  */
-function requestTimings(session) {
+function requestTimings(session, events) {
   const MIN_WINDOW_MS = 20
   const timings = new Map()
+  const events_ = Array.isArray(events) ? events : readEvents(session)
   let requestAt = null
-  for (const event of readEvents(session)) {
+  for (const event of events_) {
     if (event?.type === 'request/header') {
       requestAt = typeof event.time === 'number' ? event.time : null
       continue
@@ -724,7 +725,13 @@ function requestTimings(session) {
     requestAt = null
     if (typeof turn !== 'number' || typeof step !== 'number') continue
     const timing = timingOf(event, startedAt)
-    if (timing !== undefined) timings.set(`${turn}/${step}`, timing)
+    if (timing === undefined) continue
+    timings.set(`${turn}/${step}`, timing)
+    // A turn record has no step of its own, so its key would carry `undefined`
+    // and never match. The turn's figures are its last step's -- the step that
+    // produced the turn's closing message -- so this entry is overwritten as
+    // the turn advances and ends up holding that one.
+    timings.set(`${turn}/?`, timing)
   }
   return timings
 }
@@ -844,9 +851,9 @@ function numberOr(value, fallback) {
  *
  * @returns `{ id, kind, text, turn, step }` per record, newest first.
  */
-function retentionRecords(session) {
+function retentionRecords(session, timings) {
   if (typeof session?.deriveMessages !== 'function') return []
-  const timings = requestTimings(session)
+  const timings_ = timings instanceof Map ? timings : requestTimings(session)
   const records = []
   for (const data of session.deriveMessages()) {
     if (data?.source?.plugin === COMPACT_PLUGIN) {
@@ -889,9 +896,9 @@ function retentionRecords(session) {
     // its cost is one request; a compact record and the two messages that came
     // back without usage have none, and stay without these fields rather than
     // reporting zero.
-    const timing = record.turn === null || record.step === null
+    const timing = record.turn === null
       ? undefined
-      : timings.get(`${record.turn}/${record.step}`)
+      : timings_.get(`${record.turn}/${record.step ?? '?'}`)
     return { ...record, size: byteLength(record.text), ...(timing ?? {}) }
   }).sort((a, b) => {
     const turn = (b.turn ?? 0) - (a.turn ?? 0)
@@ -933,7 +940,10 @@ function byteLength(text) {
  * @param session - the running session.
  * @returns the total UTF-8 byte length of every projected message's content.
  */
-function contextBytes(session) {
+function contextBytes(session, events) {
+  const events_ = Array.isArray(events) ? events : readEvents(session)
+  const used = contextTokens(events_)
+  if (used !== null) return used
   if (typeof session?.deriveMessages !== 'function') return 0
   let total = 0
   for (const data of session.deriveMessages()) {
@@ -943,6 +953,28 @@ function contextBytes(session) {
     }
   }
   return total
+}
+
+/**
+ * How many tokens the last request actually carried, or null without one.
+ *
+ * This is the host's own count from the provider exchange, so it is the number
+ * the model was billed for rather than something reconstructed here. The
+ * byte-length fallback below counts what is in a message's body and misses
+ * everything the envelope adds, which is why the two disagree.
+ *
+ * @param events - the session's events, already in hand.
+ * @returns the last request's input tokens, or null when there is none.
+ */
+function contextTokens(events) {
+  let used = null
+  for (const event of events) {
+    if (event?.type !== 'assistant/message') continue
+    const usage = parseUsage(event?.data?.usage)
+    const tokens = numberOr(usage?.inputTokens, undefined)
+    if (typeof tokens === 'number' && tokens > 0) used = tokens
+  }
+  return used
 }
 
 /** The plain text of a message's content blocks, concatenated. */
@@ -996,10 +1028,14 @@ export function installRecordsRoute(ctx) {
             // No session is not a failure: the tab is opened per session and a
             // cold one simply has nothing to show yet.
             if (session === undefined) return json({ ok: true, value: [], context: null })
+            // One scan for both answers: reading the log is the expensive part,
+            // and `retentionRecords` would otherwise go and read it again.
+            const events = readEvents(session)
+            const timings = requestTimings(session, events)
             return json({
               ok: true,
-              value: retentionRecords(session),
-              context: contextBytes(session),
+              value: retentionRecords(session, timings),
+              context: contextBytes(session, events),
             })
           } catch (error) {
             return json({ ok: false, error: String(error?.message ?? error) }, 500)
