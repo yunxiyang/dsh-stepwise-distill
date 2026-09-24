@@ -828,8 +828,15 @@ function sumGaps(dt) {
   return total
 }
 
-/** `usage` reaches the event as a JSON string on some hosts and an object on others. */
+/**
+ * `usage` as an object, from either of the two shapes it arrives in.
+ *
+ * A logged event carries it as a JSON string on some hosts; a stream element
+ * carries it as the object itself. Both are accepted here so the callers do
+ * not each have to know which of the two they are holding.
+ */
 function parseUsage(usage) {
+  if (usage !== null && typeof usage === 'object') return usage
   if (typeof usage !== 'string') return undefined
   try {
     const parsed = JSON.parse(usage)
@@ -1259,10 +1266,10 @@ async function requestSummary(llm, config, messages, signal) {
  * @returns the newest usage known, or current when this chunk reported none.
  */
 function usageFromChunk(element, current) {
-  // Stream elements are wrappers -- `{ type, time, chunk }` -- and the usage
-  // element carries its figures on the inner `chunk`. The top-level field is
-  // only a fallback for streams that deliver the block unwrapped.
-  const parsed = parseUsage(element?.chunk?.usage ?? element?.usage)
+  // The element IS the block, so the figure sits on its own top level. The
+  // nested field is only a fallback: `{ type, time, chunk }` is the record
+  // shape a trace accumulator writes, not what a stream hands out.
+  const parsed = parseUsage(element?.usage ?? element?.chunk?.usage)
   if (parsed === undefined) return current
   // Copied field by field, not carried over: the host's own usage object does
   // not survive `JSON.stringify` unchanged, and `session.append` rejects a
