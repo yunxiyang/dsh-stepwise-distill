@@ -693,7 +693,7 @@ function recordsOf(session) {
  * `textStart` opens the visible text, and `finish` closes the message. So:
  *
  *   ttft  = first - header.time
- *   think = reasoningTokens / (reasoningEnd - first)
+ *   think = reasoningTokens / (reasoningEnd - requestSentAt)
  *   text  = (outputTokens - reasoningTokens) / (finish - textStart)
  *
  * `outputTokens` already counts the reasoning tokens, so the visible text rate
@@ -775,16 +775,21 @@ function timingOf(event, startedAt) {
   if (first === null) return undefined
 
   const ttft = startedAt === null ? null : first - startedAt
-  const reasoningTokens = numberOr(tokens.reasoningTokens, 0)
+  // Left missing when the host did not report it: `null` says this request
+  // had no reasoning tokens to count, while a number says how many. Folding
+  // a missing field to 0 makes "no such field" and "zero of them" the same
+  // record, and the panel then reports a rate for a request whose thinking
+  // it never measured.
+  const reasoningTokens = numberOr(tokens.reasoningTokens, null)
   const outputTokens = numberOr(tokens.outputTokens, 0)
-  const thinkMs = reasoningEnd === null ? null : reasoningEnd - first
+  const thinkMs = reasoningEnd === null ? null : reasoningEnd - (startedAt ?? first)
   const textMs = textStart === null || finish === null ? null : finish - textStart
   return {
     ttft,
     thinkMs,
-    thinkRate: rate(reasoningTokens, thinkMs),
+    thinkRate: reasoningTokens === null ? null : rate(reasoningTokens, thinkMs),
     textMs,
-    textRate: rate(outputTokens - reasoningTokens, textMs),
+    textRate: rate(outputTokens - (reasoningTokens ?? 0), textMs),
   }
 }
 
