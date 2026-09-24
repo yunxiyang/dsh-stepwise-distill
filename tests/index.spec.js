@@ -963,8 +963,26 @@ describe('records route', () => {
 
   // Only the methods this route reaches for: `deriveMessages` to enumerate the
   // projection, which is what decides what the model can see.
-  function sessionOf(messages) {
-    return { deriveMessages: () => messages }
+  // `deriveMessages` is the projection; `snapshotEvents` is the log the plugin
+  // reads when it wants a message the projection has already replaced.
+  function sessionOf(messages, events = []) {
+    return { deriveMessages: () => messages, snapshotEvents: () => events }
+  }
+
+  // A compaction checkpoint as it sits in the log: the host writes the summary
+  // back as a `user/message` that replaces the history it covers, so a later
+  // compaction removes it from the projection entirely.
+  function checkpointEvent({ id = 'c1', body = 'the compacted history' } = {}) {
+    return {
+      type: 'user/message',
+      seq: 1,
+      data: {
+        role: 'user',
+        id: `checkpoint-${id}`,
+        source: { kind: 'plugin', plugin: 'compact', compactionId: id },
+        content: [{ type: 'text', text: body }],
+      },
+    }
   }
 
   function record({ kind, turn, step, text: body, plugin = name }) {
@@ -1105,6 +1123,36 @@ describe('records route', () => {
     const { registered } = mountRoute({ sessions: { get: () => session } })
     const payload = await (await post(registered, { sessionId: 's1' })).json()
     expect(payload.value).toEqual([])
+  })
+
+  it('lists a checkpoint the projection no longer carries', async () => {
+    // The case the tab was reported broken on: the session was compacted, and
+    // by the time the tab was read the checkpoint had been replaced out of the
+    // projection, so a route that only reads `deriveMessages` sees nothing.
+    const session = sessionOf(
+      [record({ kind: 'step', turn: 4, step: 1, text: 'a step' })],
+      [checkpointEvent({ id: 'c-late', body: 'what the compaction kept' })],
+    )
+    const { registered } = mountRoute({ sessions: { get: () => session } })
+    const payload = await (await post(registered, { sessionId: 's1' })).json()
+    expect(payload.value).toHaveLength(2)
+    expect(payload.value[1]).toEqual({
+      id: 'compact-c-late',
+      kind: 'compact',
+      text: 'what the compaction kept',
+      turn: null,
+      step: null,
+    })
+  })
+
+  it('lists a checkpoint once when both sources carry it', async () => {
+    const session = sessionOf(
+      [{ source: { kind: 'plugin', plugin: 'compact', compactionId: 'c1' }, content: [{ type: 'text', text: 'kept once' }] }],
+      [checkpointEvent({ id: 'c1', body: 'kept once' }), checkpointEvent({ id: 'c1', body: 'kept once' })],
+    )
+    const { registered } = mountRoute({ sessions: { get: () => session } })
+    const payload = await (await post(registered, { sessionId: 's1' })).json()
+    expect(payload.value.map((item) => item.id)).toEqual(['compact-c1'])
   })
 
   it('loads without a connection to register the route on', () => {
