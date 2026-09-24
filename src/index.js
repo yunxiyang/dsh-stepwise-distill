@@ -18,7 +18,7 @@
  * @module dsh-stepwise-distill
  */
 
-import { BlockAssembler, createSystemMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
+import { AssistantStreamAccumulator, BlockAssembler, assembleAssistantStream, createSystemMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
 import {
   SUMMARY_MARKER,
   TURN_MARKER,
@@ -729,11 +729,13 @@ function requestTimings(session, events) {
       if (source?.plugin !== name) continue
       const covers = event?.data?.summaryOf
       if (typeof covers?.turn === 'number' && typeof covers?.step === 'number') {
-        timings.set(`${covers.turn}/${covers.step}`, event?.data?.timing ?? null)
+        timings.set(`${covers.turn}/${covers.step}`, timingFromRecord(event?.data?.timing) ?? null)
         continue
       }
       const coveredTurn = event?.data?.summaryOfTurn
-      if (typeof coveredTurn === 'number') timings.set(`${coveredTurn}/?`, event?.data?.timing ?? null)
+      if (typeof coveredTurn === 'number') {
+        timings.set(`${coveredTurn}/?`, timingFromRecord(event?.data?.timing) ?? null)
+      }
       continue
     }
     if (event?.type !== 'assistant/message') continue
@@ -805,6 +807,66 @@ function timingOf(event, startedAt) {
   // it never measured.
   const reasoningTokens = numberOr(tokens.reasoningTokens, null)
   const outputTokens = numberOr(tokens.outputTokens, 0)
+  const thinkMs = reasoningEnd === null ? null : reasoningEnd - (startedAt ?? first)
+  const textMs = textStart === null || finish === null ? null : finish - textStart
+  return {
+    ttft,
+    thinkMs,
+    thinkRate: reasoningTokens === null ? null : rate(reasoningTokens, thinkMs),
+    textMs,
+    textRate: rate(outputTokens - (reasoningTokens ?? 0), textMs),
+  }
+}
+
+/**
+ * Remember where this stream's segments began and ended.
+ *
+ * Read from the settled run rather than from the chunks as they arrived: a
+ * chunk carries no time of its own -- the accumulator stamps one when it
+ * packs deltas into a run, and only there do segment limits exist.
+ *
+ * @param ends - the object to fill.
+ * @param runs - `AssistantStreamAccumulator`'s snapshot of the stream.
+ */
+function recordRuns(ends, runs) {
+  for (const run of Array.isArray(runs) ? runs : []) {
+    if (run?.type === 'chunk') {
+      if (typeof run.time !== 'number') continue
+      if (ends.first === undefined) ends.first = run.time
+      if (run.chunk?.type === 'finish') ends.finish = run.time
+      continue
+    }
+    if (typeof run?.time0 !== 'number') continue
+    if (run.type === 'reasoning-chunks') ends.reasoningEnd = run.time0 + sumGaps(run.dt)
+    if (run.type === 'text-chunks') ends.textStart = run.time0
+  }
+}
+
+/**
+ * The figures for a request the plugin made itself.
+ *
+ * The record carries what the stream handed over -- when the call went out,
+ * what it used, and where its segments began and ended -- and nothing derived:
+ * a partial capture stays readable and the same figures can be recomputed.
+ * Computed here through the same arithmetic `timingOf` uses for a logged
+ * message, so a step reports the same shape whichever call it came from.
+ *
+ * @param timing - the record's `timing`, or undefined when it carries none.
+ * @returns the figures, or undefined when there is not enough to divide by.
+ */
+function timingFromRecord(timing) {
+  const usage = timing?.usage
+  const ends = timing?.ends
+  if (!hasTokenCount(usage) || ends === undefined) return undefined
+  const startedAt = typeof timing?.startedAt === 'number' ? timing.startedAt : null
+  const first = typeof ends.first === 'number' ? ends.first : null
+  if (first === null) return undefined
+  const reasoningEnd = typeof ends.reasoningEnd === 'number' ? ends.reasoningEnd : null
+  const textStart = typeof ends.textStart === 'number' ? ends.textStart : null
+  const finish = typeof ends.finish === 'number' ? ends.finish : null
+  const ttft = startedAt === null ? null : first - startedAt
+  const reasoningTokens = numberOr(usage.reasoningTokens, null)
+  const outputTokens = numberOr(usage.outputTokens, 0)
   const thinkMs = reasoningEnd === null ? null : reasoningEnd - (startedAt ?? first)
   const textMs = textStart === null || finish === null ? null : finish - textStart
   return {
@@ -1245,13 +1307,16 @@ async function requestSummary(llm, config, messages, signal) {
   // the only way the panel can report what this step actually cost -- the
   // events for the step describe the model's request, and that one may be a
   // bare tool call with no text and nothing to time.
-  const callTiming = { startedAt: requestSentAt, usage: {} }
-  const assembler = new BlockAssembler()
+  const callTiming = { startedAt: requestSentAt, usage: {}, ends: {} }
+  const assembler = new AssistantStreamAccumulator()
   for await (const chunk of stream) {
     callTiming.usage = usageFromChunk(chunk, callTiming.usage)
-    assembler.push(chunk)
+    assembler.push({ time: Date.now(), chunk })
   }
-  return { text: parseSummary(assembler.blocks()), timing: callTiming }
+  const runs = assembler.snapshot()
+  recordRuns(callTiming.ends, runs)
+  const settled = assembleAssistantStream(runs, new BlockAssembler())
+  return { text: parseSummary(settled.blocks()), timing: callTiming }
 }
 
 
@@ -1495,13 +1560,16 @@ async function requestTurnSummary(llm, config, messages, signal) {
   // never writes it to the log, so its usage and its stream exist only here.
   // Without this the panel could only ever show the turn's figures from the
   // model's own call -- the one this record replaced.
-  const callTiming = { startedAt: requestSentAt, usage: {} }
-  const assembler = new BlockAssembler()
+  const callTiming = { startedAt: requestSentAt, usage: {}, ends: {} }
+  const assembler = new AssistantStreamAccumulator()
   for await (const chunk of stream) {
     callTiming.usage = usageFromChunk(chunk, callTiming.usage)
-    assembler.push(chunk)
+    assembler.push({ time: Date.now(), chunk })
   }
-  return { text: parseSummary(assembler.blocks()), timing: callTiming }
+  const runs = assembler.snapshot()
+  recordRuns(callTiming.ends, runs)
+  const settled = assembleAssistantStream(runs, new BlockAssembler())
+  return { text: parseSummary(settled.blocks()), timing: callTiming }
 }
 
 
