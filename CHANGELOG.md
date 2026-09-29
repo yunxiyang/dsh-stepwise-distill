@@ -29,6 +29,13 @@
   exposing `getSnapshot` and only wraps the adapter (its `state` as the snapshot,
   its `mutate` as the write) when no controller is reachable. The card still
   `void`s its writes, so the wrapper loses nothing but the subscription.
+- Let the sidebar tab's list scroll again. The host keeps a tab body at
+  `height: 100%` with `overflow: hidden`, and the panel's root was an ordinary
+  flex child of it -- `flex: 0 1 auto` with the default `min-height: auto` --
+  so it neither filled that body nor shrank below its content. Anything longer
+  than the pane was cut off with no scroller left to reach it. The root now
+  claims `flex: 1 1 auto`, `min-height: 0` and `overflow-y: auto`, plus
+  `box-sizing: border-box` so its 12px padding does not add to that height.
 - Point the test suite at the installed host. `scripts/link-host-deps.mjs` only
   looked for a packed `app.asar`, so an unpacked install silently kept the
   previous `node_modules` copies and the suite validated against a host that
