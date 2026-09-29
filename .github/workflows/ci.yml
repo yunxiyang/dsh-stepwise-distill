@@ -22,8 +22,9 @@ jobs:
           node --check src/index.js
           node --check src/distill.js
           node --check src/summarize.js
+          node --check src/client.js
           node --check scripts/lib/events.mjs
       - name: Tests
-        run: npx vitest run tests/summarize.spec.js tests/distill.spec.js tests/events.spec.js
+        run: npx vitest run tests/summarize.spec.js tests/distill.spec.js tests/events.spec.js tests/client.spec.js
       - name: Package dry run
         run: npm pack --dry-run
