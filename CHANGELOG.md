@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.0
 
 - Write records with a producer-owned source kind. Session format v4 refuses the
   retired `{ kind: 'plugin', plugin: name }` wrapper on persist -- "format v4
@@ -71,7 +71,24 @@
   0.2.0 bundles parse, and the vendored copies the suite runs against are
   0.2.0-rc.1.
 
-## 0.2.0
+- Time and count the summary call from the stream the host actually delivers. The
+  plugin's own call used to be streamed through `BlockAssembler`, which reads no
+  timestamps, so the record carried no segment bounds and the panel reported
+  `-- t/s` for a call that had visibly streamed an answer. The host's
+  `AssistantStreamAccumulator` is the object a stream has to be fed to. Usage had
+  three problems of its own on top of that: the provider puts it on the top level
+  of its stream element while the plugin read a nested field, `parseUsage`
+  accepted only the JSON string the log carries and dropped elements that already
+  held an object, and an empty usage object divides into no rate at all -- it
+  looks like a count.
+
+- Report nothing for a call the plugin never timed. Each turn and step key had
+  two writers: the plugin's own record and the `assistant/message` that closes
+  it, and the message wrote last and won while measuring the call the record
+  replaced -- a different, smaller one. Only the record writes these keys now,
+  and a record with no numbers of its own writes `null` to hold the key, so a
+  step summarized before the figures existed reads as blank instead of borrowing
+  a number that measures something else.
 
 - Announce the `keep:` contract in a system-prompt section. Numbering alone
   does not tell the model what to do with it, so without this the plugin could
