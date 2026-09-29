@@ -1,9 +1,9 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
   RECORDS_ROUTE,
+  SOURCE_KIND,
   apply,
   inject,
-  name,
   readEvents,
   resolveConfig,
   summarize,
@@ -64,7 +64,7 @@ function record(key) {
     type: 'user/message',
     data: {
       content: [{ type: 'text', text: `[step summary] what step ${key} established` }],
-      source: { kind: 'plugin', plugin: 'stepwise-distill' },
+      source: { kind: SOURCE_KIND },
       summaryOf: { turn, step },
     },
   }
@@ -413,7 +413,11 @@ describe('summarize installation', () => {
     // flat on it, not nested under a `message` key.
     expect(appended[0].data.content[0].text).toContain('[step summary]')
     expect(appended[0].data.content[0].text).toContain('the step settled X')
-    expect(appended[0].data.source.kind).toBe('plugin')
+    // Producer-owned kind, and no v3 `plugin` field beside it: session format
+    // v4 refuses the retired `{ kind: 'plugin', plugin }` wrapper outright, so
+    // the whole turn fails to persist if the record is written that way.
+    expect(appended[0].data.source.kind).toBe(SOURCE_KIND)
+    expect(appended[0].data.source.plugin).toBeUndefined()
     // The summary REPLACES its step. Appending it instead puts a `user/message`
     // at the head of every later turn, and the model answers that summary as if
     // the user had just said it -- the reported symptom was the model repeating
@@ -466,7 +470,8 @@ describe('summarize installation', () => {
       expect(appended[0].type).toBe('user/message')
       expect(appended[0].data.content[0].text).toContain('[turn summary]')
       expect(appended[0].data.content[0].text).toContain('the turn taught X')
-      expect(appended[0].data.source.kind).toBe('plugin')
+      expect(appended[0].data.source.kind).toBe(SOURCE_KIND)
+      expect(appended[0].data.source.plugin).toBeUndefined()
       // Purely an addition. A replace here would delete a span the step records
       // already own, and `rawSeqs`/`sourceEventSeqs` have nothing to cite.
       expect(appended[0].opts.surfaceOp).toBe('append')
@@ -633,7 +638,7 @@ describe('summary message shape', () => {
         type: 'user/message',
         data: {
           content: [{ type: 'text', text: '[step summary] the step settled X' }],
-          source: { kind: 'plugin', plugin: 'stepwise-distill' },
+          source: { kind: SOURCE_KIND },
           summaryOf: { turn: 1, step: 1 },
         },
       },
@@ -968,9 +973,11 @@ describe('records route', () => {
   }
 
 
-  function record({ kind, turn, step, text: body, plugin = name }) {
+  // A record as this plugin writes it under session format v4: the producer
+  // owns the source kind outright, and `plugin` is no longer a field at all.
+  function record({ kind, turn, step, text: body, sourceKind = SOURCE_KIND }) {
     const data = {
-      source: { kind: 'plugin', plugin },
+      source: { kind: sourceKind },
       content: [{ type: 'text', text: body }],
     }
     if (kind === 'turn') data.summaryOfTurn = turn
@@ -979,11 +986,11 @@ describe('records route', () => {
   }
 
   // A compaction checkpoint as the host writes it: a `user/message` whose
-  // source carries the `compact` marker, produced by `compactCheckpointSource`
-  // and appended in place of the history it covers.
+  // source carries the `compact-checkpoint` kind, produced by
+  // `compactCheckpointSource` and appended in place of the history it covers.
   function checkpoint({ id = 'c1', body = 'the compacted history' } = {}) {
     return {
-      source: { kind: 'plugin', plugin: 'compact', compactionId: id },
+      source: { kind: 'compact-checkpoint', compactionId: id },
       content: [{ type: 'text', text: body }],
     }
   }
@@ -1020,8 +1027,8 @@ describe('records route', () => {
       record({ kind: 'turn', turn: 1, text: 'first turn' }),
       // Not written by this plugin, and a message with no text at all: neither
       // is a record, so neither may reach the panel.
-      record({ kind: 'step', turn: 2, step: 2, text: 'someone else', plugin: 'other' }),
-      { source: { kind: 'plugin', plugin: name }, content: [] },
+      record({ kind: 'step', turn: 2, step: 2, text: 'someone else', sourceKind: 'plugin:other' }),
+      { source: { kind: SOURCE_KIND }, content: [] },
     ])
     const { registered } = mountRoute({ sessions: { get: () => session } })
     const payload = await (await post(registered, { sessionId: 's1' })).json()

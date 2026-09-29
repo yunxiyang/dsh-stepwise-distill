@@ -16,7 +16,7 @@
  * @module dsh-stepwise-distill/scripts/link-host-deps
  */
 
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -24,11 +24,44 @@ import { fileURLToPath } from 'node:url'
 const HERE = dirname(fileURLToPath(import.meta.url))
 const ROOT = resolve(HERE, '..')
 
-/** Candidate locations of the installed DSH application. */
-const APP_CANDIDATES = [
-  '/Applications/DSH Desktop.app/Contents/Resources/app.asar',
-  join(homedir(), 'Applications/DSH Desktop.app/Contents/Resources/app.asar'),
-]
+/**
+ * Shell names the installer has shipped, newest first.
+ *
+ * `DeepSeek Harness` is the current shell; `DSH NEXT` and `DSH Desktop` are the
+ * two that came before it. The order is the preference, and it matters whenever
+ * more than one is installed: this script exists to stop the suite validating
+ * against a host the plugin no longer targets, and picking the older shell
+ * silently does exactly that.
+ */
+const SHELLS = ['DeepSeek Harness', 'DSH NEXT', 'DSH Desktop']
+
+/**
+ * Candidate locations of the installed DSH application.
+ *
+ * Both layouts of every shell are listed because the installer has shipped
+ * each of them: a packed `app.asar`, and an unpacked `app/` directory. Only the
+ * first was handled, so an unpacked install silently left whatever host
+ * packages were already in `node_modules` -- and the suite then tested against
+ * a stale host that accepted shapes the running one rejects.
+ */
+const APP_CANDIDATES = ['/Applications', join(homedir(), 'Applications')].flatMap(
+  directory => SHELLS.flatMap(shell => [
+    join(directory, `${shell}.app/Contents/Resources/app.asar`),
+    join(directory, `${shell}.app/Contents/Resources/app`),
+  ]),
+)
+
+/**
+ * Where an installed shell keeps the packages, relative to its runtime root.
+ *
+ * A packed shell nests a whole runtime under `dsh/`, and the packages the
+ * plugin imports belong to that runtime rather than to the shell wrapping it --
+ * the archive's own top level is the desktop shell's much smaller dependency
+ * set. An unpacked `app/` is the runtime itself, so the same packages sit at
+ * `node_modules`. Probed in this order rather than assumed, because the layout
+ * follows the shell and not the archive format.
+ */
+const MODULE_PREFIXES = ['dsh/node_modules', 'node_modules']
 
 /** Packages the plugin imports directly; their chains are walked from here. */
 const ROOTS = ['@deepseek-ai/dsh-tools']
@@ -44,13 +77,37 @@ const ROOTS = ['@deepseek-ai/dsh-tools']
 const OPTIONAL = process.argv.includes('--optional')
 
 /**
- * Bytes of pickle framing before each payload.
+ * Replace host packages that are already present.
  *
- * Asar stores file bodies with a 1-byte type tag in front, and the archive's
- * `size` field counts the payload alone, so reads start one byte past the
- * recorded offset.
+ * Off by default so an ordinary install never fights a package manager. A host
+ * upgrade is exactly the case the copies have to be replaced: leaving a stale
+ * `@deepseek-ai/dsh-session` in place makes the suite validate against the
+ * previous format, which is how a source kind the running host refuses stayed
+ * green here.
  */
-const PICKLE_TAG_BYTES = 1
+const REFRESH = process.argv.includes('--refresh')
+
+/**
+ * First payload byte of an asar archive.
+ *
+ * The header is a pickle: a field length, the header pickle's own length, then
+ * the JSON length at offset 12 and the JSON itself at offset 16. The payload
+ * section starts where that JSON ends rounded up to a four-byte boundary -- the
+ * current archives pad by three bytes, older and smaller ones by none -- and a
+ * file's `offset` names its bytes from that boundary directly, with no
+ * per-file framing in front of them.
+ */
+const HEADER_JSON_START = 16
+
+/**
+ * Offset of an archive's payload section.
+ *
+ * @param headerSize - the JSON length read from offset 12.
+ * @returns the first byte a file `offset` is measured from.
+ */
+function dataStartOf(headerSize) {
+  return (HEADER_JSON_START + headerSize + 3) & ~3
+}
 
 /**
  * Read the file table out of an asar archive.
@@ -67,9 +124,9 @@ function readArchive(path) {
     throw new Error(`${path} is not an asar archive`)
   }
   const headerSize = buffer.readUInt32LE(12)
-  const jsonStart = 16
+  const jsonStart = HEADER_JSON_START
   const directory = JSON.parse(buffer.subarray(jsonStart, jsonStart + headerSize).toString('utf8'))
-  return { directory, dataStart: jsonStart + headerSize, buffer }
+  return { directory, dataStart: dataStartOf(headerSize), buffer }
 }
 
 /**
@@ -101,9 +158,9 @@ function extract(archive, entryPath, destination) {
   let written = 0
   const walk = (item, target) => {
     if (item.files === undefined) {
-      // Each payload is pickle-framed: a 1-byte type tag precedes the bytes,
-      // and `size` counts only the payload itself.
-      const start = archive.dataStart + Number(item.offset) + PICKLE_TAG_BYTES
+      // The payload follows its recorded offset directly: the archive's `size`
+      // counts the bytes and nothing frames them.
+      const start = archive.dataStart + Number(item.offset)
       mkdirSync(dirname(target), { recursive: true })
       writeFileSync(target, archive.buffer.subarray(start, start + item.size))
       written += 1
@@ -128,27 +185,91 @@ function extract(archive, entryPath, destination) {
 function manifestAt(archive, location) {
   const node = nodeAt(archive, `${location}/package.json`)
   if (node === undefined || node.files !== undefined) return undefined
-  const start = archive.dataStart + Number(node.offset) + PICKLE_TAG_BYTES
+  const start = archive.dataStart + Number(node.offset)
   return JSON.parse(archive.buffer.subarray(start, start + node.size).toString('utf8'))
+}
+
+/**
+ * Present one installed host layout through a single surface.
+ *
+ * The packed and unpacked layouts differ only in how bytes are reached, so the
+ * chain walk and the copy loop ask these three questions and never branch on
+ * the layout themselves.
+ *
+ * The package directory is located by probing {@link MODULE_PREFIXES} for the
+ * first root, so a shell that nests its runtime under `dsh/` is read from the
+ * runtime and a shell that does not is read from its top level.
+ *
+ * @param appPath - the `.asar` archive or the unpacked `app` directory.
+ * @returns `{ has, manifest, copy }` over the installed packages.
+ */
+function openSource(appPath) {
+  if (appPath.endsWith('.asar')) {
+    const archive = readArchive(appPath)
+    const prefix = MODULE_PREFIXES.find(
+      candidate => nodeAt(archive, `${candidate}/${ROOTS[0]}`) !== undefined,
+    )
+    if (prefix === undefined) throw new Error(`${appPath} carries no ${ROOTS[0]}`)
+    return {
+      has: name => nodeAt(archive, `${prefix}/${name}`) !== undefined,
+      manifest: name => manifestAt(archive, `${prefix}/${name}`),
+      copy: (name, target) => extract(archive, `${prefix}/${name}`, target),
+    }
+  }
+  const prefix = MODULE_PREFIXES.find(
+    candidate => existsSync(join(appPath, candidate, ROOTS[0], 'package.json')),
+  )
+  if (prefix === undefined) throw new Error(`${appPath} carries no ${ROOTS[0]}`)
+  const modules = join(appPath, prefix)
+  return {
+    has: name => existsSync(join(modules, name, 'package.json')),
+    manifest: name => {
+      try {
+        return JSON.parse(readFileSync(join(modules, name, 'package.json'), 'utf8'))
+      } catch {
+        return undefined
+      }
+    },
+    copy: (name, target) => {
+      cpSync(join(modules, name), target, { recursive: true })
+      return countFiles(target)
+    },
+  }
+}
+
+/**
+ * Count the regular files under one directory.
+ *
+ * Only used to keep the script's summary honest; the copy itself is `cpSync`.
+ *
+ * @param directory - directory to walk.
+ * @returns the number of files written.
+ */
+function countFiles(directory) {
+  let total = 0
+  for (const entry of readdirSync(directory, { withFileTypes: true })) {
+    const child = join(directory, entry.name)
+    total += entry.isDirectory() ? countFiles(child) : 1
+  }
+  return total
 }
 
 /**
  * Walk a package's dependency and peer-dependency chain breadth-first.
  *
- * @param archive - the parsed archive.
+ * @param source - an installed host layout, from {@link openSource}.
  * @param roots - package names to start from.
  * @returns every reachable package name, dependencies first.
  */
-function resolveChain(archive, roots) {
+function resolveChain(source, roots) {
   const seen = new Set()
   const order = []
   const queue = [...roots]
   while (queue.length > 0) {
     const name = queue.shift()
     if (seen.has(name)) continue
-    const location = `node_modules/${name}`
-    if (nodeAt(archive, location) === undefined) {
-      process.stderr.write(`link-host-deps: ${name} not found in the archive\n`)
+    if (!source.has(name)) {
+      process.stderr.write(`link-host-deps: ${name} not found in the installation\n`)
       continue
     }
     seen.add(name)
@@ -157,7 +278,7 @@ function resolveChain(archive, roots) {
     // dsh-tools imports its dependencies at load time, and its peers are the
     // host-provided half of the same graph -- equally unresolvable from a bare
     // clone, so both are followed.
-    const manifest = manifestAt(archive, location)
+    const manifest = source.manifest(name)
     if (manifest === undefined) continue
     for (const field of ['dependencies', 'peerDependencies']) {
       for (const dependency of Object.keys(manifest[field] ?? {})) {
@@ -183,8 +304,8 @@ function main() {
     process.exit(1)
   }
 
-  const archive = readArchive(appPath)
-  const chain = resolveChain(archive, ROOTS)
+  const source = openSource(appPath)
+  const chain = resolveChain(source, ROOTS)
   if (chain.length === 0) {
     process.stderr.write('link-host-deps: resolved no packages\n')
     process.exit(1)
@@ -194,13 +315,18 @@ function main() {
   const skipped = []
   for (const name of chain) {
     const target = join(ROOT, 'node_modules', name)
-    // An already-present copy is left alone: it may be a real install, and
-    // overwriting it would fight the user's package manager.
+    // An already-present copy is left alone unless a refresh was asked for: it
+    // may be a real install, and overwriting it would fight the user's package
+    // manager. `--refresh` exists for the host upgrade that makes the copy stale.
     if (existsSync(join(target, 'package.json'))) {
-      skipped.push(name)
-      continue
+      if (!REFRESH) {
+        skipped.push(name)
+        continue
+      }
+      rmSync(target, { recursive: true, force: true })
     }
-    total += extract(archive, `node_modules/${name}`, target)
+    mkdirSync(dirname(target), { recursive: true })
+    total += source.copy(name, target)
   }
 
   process.stdout.write(

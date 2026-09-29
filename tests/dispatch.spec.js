@@ -24,7 +24,7 @@ import { apply } from '../src/index.js'
 function newSession() {
   const id = `dispatch-${Math.random().toString(36).slice(2)}`
   const session = Session.create(id, [], {
-    version: 3, id, createdAt: Date.now(), cwd: '/tmp', isSeeded: false,
+    version: 4, id, createdAt: Date.now(), cwd: '/tmp', isSeeded: false,
   })
   session.append(
     'request/header',
@@ -205,8 +205,14 @@ describe('main request at the dispatch boundary', () => {
     // Raw material is what the mechanism removes; the findings it produced are
     // what it keeps. Both halves matter -- dropping the material without
     // keeping the finding loses the step entirely.
+    //
+    // Turn 1 is superseded, so its material is gone. Turn 2 is the newest record
+    // and keeps its own: a concluded record alone was measurably not enough to
+    // act on. v4 is also what makes the kept material visible here at all -- a
+    // `tool/result` now derives to a native `tool` message with flattened text,
+    // where v3 nested it out of this file's top-level `textOf` reach.
     expect(text).not.toContain('FACT-X: port is 8080')
-    expect(text).not.toContain('FACT-Y: client wants 8080')
+    expect(text).toContain('FACT-Y: client wants 8080')
     expect(text).toContain('established FACT-X')
     expect(text).toContain('established FACT-Y')
   })
@@ -325,7 +331,7 @@ describe('the task survives its step being written down', () => {
       'user/message',
       createUserMessage({
         content: [{ type: 'text', text: 'loop-continue instruction' }],
-        source: { kind: 'plugin', plugin: 'loop-continue' },
+        source: { kind: 'plugin:loop-continue' },
       }),
       { surfaceOp: 'append' },
     )

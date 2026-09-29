@@ -16,13 +16,13 @@ import {
   createToolResultMessage,
   createUserMessage,
 } from '@deepseek-ai/dsh-llm'
-import { apply } from '../src/index.js'
+import { apply, SOURCE_KIND } from '../src/index.js'
 
 /** A fresh host session with the route a retention request has to reuse. */
 function newSession() {
   const id = `continuity-${Math.random().toString(36).slice(2)}`
   const session = Session.create(id, [], {
-    version: 3, id, createdAt: Date.now(), cwd: '/tmp', isSeeded: false,
+    version: 4, id, createdAt: Date.now(), cwd: '/tmp', isSeeded: false,
   })
   session.append(
     'request/header',
@@ -150,10 +150,43 @@ describe('history continuity', () => {
     writeStep(session, { turn: 1, task: 'TASK: find the port', note: 'Looking.', toolOutput: 'FACT-X: port is 8080' })
     await preStep({ turn: 1, step: 2 })
     const written = session.snapshotEvents?.().filter(
-      event => event.type === 'user/message' && event.data?.source?.plugin === 'stepwise-distill',
+      event => event.type === 'user/message' && event.data?.source?.kind === SOURCE_KIND,
     ) ?? []
     expect(written.length).toBe(1)
     expect(written[0].data.summaryOf).toEqual({ turn: 1, step: 1 })
+  })
+
+  it('writes only producer-owned source kinds, as session format v4 demands', async () => {
+    // Regression. The record was written as `{ kind: 'plugin', plugin: name }`,
+    // the v3 wrapper. A v4 reader refuses it on persist -- "format v4 message
+    // requires a producer-owned source kind" -- and since the record is appended
+    // from a step hook, the refusal failed the whole turn.
+    //
+    // Checked over every message in the log rather than over the one record, so
+    // the rule stands wherever a future record is written from.
+    const session = newSession()
+    const preStep = mount(session, echoingLlm())
+    writeStep(session, { turn: 1, task: 'TASK: find the port', note: 'Looking.', toolOutput: 'FACT-X: port is 8080' })
+    await preStep({ turn: 1, step: 2 })
+    writeStep(session, { turn: 2, task: 'TASK: use the port', note: 'Using.', toolOutput: 'FACT-Y: client on 8080' })
+    await preStep({ turn: 2, step: 2 })
+
+    const messages = (session.snapshotEvents?.() ?? []).flatMap((event) => {
+      if (event.type === 'user/message') return [event.data]
+      const message = event.data?.message
+      return message === undefined ? [] : [message]
+    })
+    expect(messages.length).toBeGreaterThan(0)
+    for (const message of messages) {
+      const source = message?.source
+      if (source === undefined) continue
+      // The host's own admission rule, restated: a producer-owned source kind is
+      // a non-empty string, and the retired `plugin` wrapper is not one.
+      expect(typeof source.kind).toBe('string')
+      expect(source.kind).not.toBe('')
+      expect(source.kind).not.toBe('plugin')
+      expect(source).not.toHaveProperty('plugin')
+    }
   })
 
   it('shows the retention call the step it is writing down', async () => {
@@ -167,17 +200,24 @@ describe('history continuity', () => {
   })
 
   it('carries what the step established into the next request', async () => {
-    // The retained text replaces the step's raw material, so it is the only
-    // record of that step the agent sees again. If it does not carry the step's
-    // finding, the agent re-derives the step from scratch -- which is the
-    // repetition this mechanism exists to prevent.
+    // The conclusion reaches the next request; that is what the mechanism
+    // exists to carry. If it does not, the agent re-derives the step from
+    // scratch -- the repetition this exists to prevent.
     const session = newSession()
     const preStep = mount(session, echoingLlm())
     writeStep(session, { turn: 1, task: 'TASK: find the port', note: 'Looking.', toolOutput: 'FACT-X: port is 8080' })
     await preStep({ turn: 1, step: 2 })
     const text = textOf(session.deriveMessages())
     expect(text).toContain('retained FACT-X')
-    expect(text).not.toContain('port is 8080')
+    // Step 1 is the newest record here, and the newest step deliberately keeps
+    // its material beside its conclusion -- a concluded record was measurably
+    // not enough to act on. So the material is expected, and what the next test
+    // pins down is that it stops arriving once a newer step supersedes it.
+    //
+    // This only became visible on v4: a `tool/result` now derives to a native
+    // `tool` message with flattened text, where v3 nested it under a
+    // `tool-result` block that this file's top-level `textOf` could not see.
+    expect(text).toContain('FACT-X: port is 8080')
   })
 
   it('keeps earlier steps intact when a later step is written down', async () => {
@@ -192,5 +232,8 @@ describe('history continuity', () => {
     // accumulate is history the agent cannot rely on.
     expect(text).toContain('retained FACT-X')
     expect(text).toContain('retained FACT-Y')
+    // And the earlier step's raw material is the thing actually dropped: turn 1
+    // is no longer the newest record, so only its conclusion is left.
+    expect(text).not.toContain('FACT-X: port is 8080')
   })
 })

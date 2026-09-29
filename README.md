@@ -135,6 +135,13 @@ dsh plugin --profile <name> add dsh-stepwise-distill
 The bundle patch is a plain insert with no frozen config, so a profile or
 Settings-UI change applies on the next step without a restart.
 
+The declared peer range is `^0.1.1-rc.2 || ^0.2.0-rc.1`, so the plugin claims
+the 0.1.1 through 0.1.7 line and the 0.2.x one. That range is enforced rather
+than advisory: `dsh-app-boot` skips a bundle whose `@deepseek-ai/dsh-*` peers
+the running runtime does not satisfy, and prints why. On an unlisted line the
+plugin therefore installs and stays inert -- no prompt section, no step hook, no
+tab -- instead of failing loudly at every step.
+
 ## Measuring
 
 Inside a session, `/distill` reports what the plugin is holding back: how many
@@ -169,12 +176,25 @@ local development `npm run link-host-deps` copies it -- and everything in its
 chain -- out of the installed application:
 
 ```
-npm run link-host-deps          # from /Applications/DSH Desktop.app
+npm run link-host-deps          # from the newest installed shell
 npm run link-host-deps -- --optional   # warn instead of fail when DSH is absent
+npm run link-host-deps -- --refresh    # replace copies taken from an older DSH
 ```
 
 `postinstall` runs it with `--optional`, so `npm install` restores the packages
-automatically and still succeeds on a machine without DSH Desktop (tests just
-cannot run there). The copy parses the asar archive directly -- no `asar`
-package, no network. The chain is walked from package manifests rather than a
-fixed list, so a DSH upgrade does not silently invalidate it.
+automatically and still succeeds on a machine without DSH (tests just cannot run
+there). The copy reads the packed `app.asar` and the unpacked `app/` layout
+alike, and both places a runtime keeps its modules -- a shell's own top level,
+and the `dsh/` runtime a packed shell nests -- with no `asar` package and no
+network. The chain is walked from package manifests rather than a fixed list, so
+a DSH upgrade does not silently invalidate it.
+
+Shells are probed newest first (`DeepSeek Harness`, then `DSH NEXT`, then
+`DSH Desktop`), because a machine that has more than one installed would
+otherwise link the old one and validate against a host this plugin no longer
+targets.
+
+After a DSH upgrade, run it with `--refresh`: an already-present copy is left
+alone by default, and a stale `@deepseek-ai/dsh-session` keeps the suite
+validating against the previous session format -- which is how a source kind the
+running host rejects once stayed green here.

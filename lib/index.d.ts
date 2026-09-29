@@ -26,6 +26,18 @@ export declare const optionalInject: ['commands', 'tools', 'llm']
 export declare const UNKNOWN_TOOL: '<unknown>'
 
 /**
+ * Producer-owned source kind carried by this plugin's own records.
+ *
+ * `plugin:stepwise-distill`, which is exactly what the session v3-to-v4
+ * migration derives for this plugin, so records written before the upgrade
+ * keep answering to the same kind.
+ */
+export declare const SOURCE_KIND: 'plugin:stepwise-distill'
+
+/** Source kind of the host's compaction checkpoint messages. */
+export declare const COMPACT_CHECKPOINT_KIND: 'compact-checkpoint'
+
+/**
  * Non-enumerable marker recording that a session's projection is wrapped.
  *
  * Stored on the session rather than in module scope because sessions outlive

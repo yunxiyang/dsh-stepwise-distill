@@ -92,6 +92,8 @@
 dsh plugin --profile <name> add dsh-stepwise-distill
 ```
 
+声明的 peer 范围是 `^0.1.1-rc.2 || ^0.2.0-rc.1`，也就是认下 0.1.1 到 0.1.7 这一线，以及 0.2.x。这个范围是被执行的，不是一句说明：`@deepseek-ai/dsh-*` 的 peer 不被当前运行时满足时，`dsh-app-boot` 会整个跳过这个 bundle 并打印原因。所以在没有列出的版本线上，插件装得上却完全不工作——没有 prompt 段落、没有步钩子、没有面板——而不是每一步都报错。
+
 ## 度量
 
 在会话里，`/distill` 报告这个插件扣下了什么：一共有多少步、其中多少步已经小结、以及之后各轮不再携带的原始材料共多少字节。
@@ -117,8 +119,13 @@ npm run check   # lib/ 必须与 src/ 一致
 `history_read` 是通过 `@deepseek-ai/dsh-tools` 的 `defineTool` 注册的，与每一个宿主工具用的是同一个调用。那个包在 DSH 随附的版本上没有发布到 npm，而且它带着一条很深的 peer 依赖链，所以不能声明成普通依赖。它由 DSH 在运行时提供；本地开发时用 `npm run link-host-deps` 从已安装的应用里把它——以及链上的全部——拷出来：
 
 ```
-npm run link-host-deps          # 从 /Applications/DSH Desktop.app
+npm run link-host-deps          # 从最新安装的那个壳里拷
 npm run link-host-deps -- --optional   # DSH 不存在时只警告，不失败
+npm run link-host-deps -- --refresh    # 覆盖从旧版 DSH 拷来的副本
 ```
 
-`postinstall` 会带 `--optional` 跑它，所以 `npm install` 会自动恢复这些包，并且在没装 DSH Desktop 的机器上仍然成功（只是那里跑不了测试）。拷贝过程直接解析 asar 归档——不用 `asar` 包，不联网。链是从各个包的 manifest 走出来的，不是一张固定清单，所以升级 DSH 不会让它悄悄失效。
+`postinstall` 会带 `--optional` 跑它，所以 `npm install` 会自动恢复这些包，并且在没装 DSH 的机器上仍然成功（只是那里跑不了测试）。拷贝过程同时支持打包的 `app.asar` 和解包的 `app/` 目录两种布局，也支持运行时放模块的两个位置——壳自己的顶层，以及打包壳嵌在里面的 `dsh/` 运行时——不用 `asar` 包，不联网。链是从各个包的 manifest 走出来的，不是一张固定清单，所以升级 DSH 不会让它悄悄失效。
+
+探测顺序是最新的壳在前（`DeepSeek Harness`、`DSH NEXT`、`DSH Desktop`）：装了不止一个的机器上，否则会连到旧的那一个，让测试按这个插件已经不再支持的宿主来校验。
+
+升级 DSH 之后请带 `--refresh` 跑一次：默认不会覆盖已存在的副本，而过期的 `@deepseek-ai/dsh-session` 会让测试继续按旧的会话格式校验——运行中的宿主拒绝的 source kind，就是这样在这里保持过全绿。

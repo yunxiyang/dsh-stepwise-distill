@@ -186,6 +186,40 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * The scope the card renders, from whichever shape the host handed over.
+     *
+     * The host does not pass a `configForms` controller into
+     * `plugins.row.config`. It passes its own adapter -- the controller's
+     * snapshot as `state`, plus a `mutate` that writes through it -- and that
+     * object has no `getSnapshot`, no `subscribe` and no `set`. Taking it for a
+     * scope is what showed an empty card: the header read `全部关闭`, every box
+     * was unticked, and the body announced `当前设置不可写，以下开关为只读。`,
+     * because `snapshot` fell back to `{}` and `writable` to false.
+     *
+     * A real controller therefore wins wherever one is offered -- the host's
+     * `form` prop when it is one, otherwise the controller this plugin already
+     * resolved for the same namespace, which is the same instance the adapter
+     * wraps. The adapter is wrapped only as a fallback, and wrapping loses the
+     * subscription: it carries a snapshot taken at render time, not the store
+     * behind it, so a write made through it lands but only the host can decide
+     * to render the result.
+     */
+    function settingsScopeOf(candidates) {
+      for (const candidate of candidates) {
+        if (candidate !== null && candidate !== undefined && typeof candidate.getSnapshot === 'function') return candidate
+      }
+      for (const candidate of candidates) {
+        if (candidate === null || candidate === undefined || typeof candidate.mutate !== 'function') continue
+        return {
+          getSnapshot: () => candidate.state ?? {},
+          subscribe: () => undefined,
+          set: (field, value) => candidate.mutate([{ op: 'set', path: [field], value }]),
+        }
+      }
+      return undefined
+    }
+
+    /**
      * The card under `Settings > Plugins`.
      *
      * It edits the switches the host serves under `SETTINGS_NAMESPACE`, so it
@@ -714,11 +748,37 @@ window.__ModuleLoader__.load({
         return release
       })
 
-      // A second injection alongside the tab's: the card needs `settingsScope`,
-      // which the tab's own scope does not carry. Registered on the namespace
-      // rather than in storage of its own -- the settings tab dispatches its
-      // cards by namespace, so claiming this key is what makes the card appear.
+      // dsh 0.1.7 line. `settingsScope` and the `settings.plugin.item` slot that
+      // hung off it are gone: a plugin's configuration is addressed by its
+      // Loader ENTRY ID through `configForms`, and a third-party bundle seats
+      // its own card in `plugins.row.config` under `<package name>#<row id>`.
+      // The `Config` schema the Node half exports is the whole registration.
+      const configForms = ctx.get('configForms')
+      if (configForms !== undefined && typeof configForms.get === 'function') {
+        const form = configForms.get(SETTINGS_NAMESPACE)
+        ctx.inject(['slots'], (scoped) => {
+          if (scoped.slots === undefined) return
+          // The host's `form` prop is an adapter rather than the controller, so
+          // the card resolves its scope instead of trusting either shape; see
+          // `settingsScopeOf`.
+          scoped.slots.inject('plugins.row.config', () => scoped.slots.register({
+            name: 'plugins.row.config',
+            key: `${PLUGIN_ID}#${SETTINGS_NAMESPACE}`,
+          }, ({ view, form: pageForm } = {}) => (view === 'summary'
+            ? null
+            : createElement(SettingsCard, { scope: settingsScopeOf([pageForm, form]) }))))
+        })
+        return
+      }
+
+      // Older line: the card needs `settingsScope`, which the tab's own scope
+      // does not carry. Registered on the namespace rather than in storage of
+      // its own -- the settings tab dispatches its cards by namespace, so
+      // claiming this key is what makes the card appear. Both the service and
+      // the slot are checked before use, because a host that has neither must
+      // lose the card rather than the plugin.
       ctx.inject(['slots', 'settingsScope'], (scoped) => {
+        if (typeof scoped.settingsScope?.bind !== 'function') return
         const scope = scoped.settingsScope.bind({ namespace: SETTINGS_NAMESPACE })
         scoped.slots.inject('settings.plugin.item', () => scoped.slots.register({
           name: 'settings.plugin.item',
@@ -728,10 +788,10 @@ window.__ModuleLoader__.load({
     }
 
     // `sessions` is declared because the panel subscribes to the session's
-    // event source. `settingsScope` is declared for the settings card, which
-    // edits the switches the host serves under SETTINGS_NAMESPACE. The host
-    // rejects an undeclared service, so a plain function plugin would have no
-    // way to reach either.
-    return { apply, name: PLUGIN_ID, inject: ['slots', 'sessions', 'settingsScope'] }
+    // event source. `settingsScope` is deliberately NOT declared: a plugin that
+    // names a service its host does not provide never mounts, and on 0.1.7 that
+    // is exactly the case -- declaring it would cost the sidebar tab as well as
+    // the card. It is resolved conditionally inside `apply` instead.
+    return { apply, name: PLUGIN_ID, inject: ['slots', 'sessions'] }
   },
 })
