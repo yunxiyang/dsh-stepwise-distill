@@ -1251,21 +1251,23 @@ function messagesOfSeq(session) {
  *
  * @param events - the event log.
  * @param agent - the running agent.
- * @returns `{ provider, model }`, or undefined when neither source has them.
+ * @returns the call config the session itself runs on, or undefined when
+ *   neither source has one.
  */
 function routeOf(events, agent) {
   const options = agent?.options
   if (typeof options?.provider === 'string' && typeof options?.model === 'string') {
-    return { provider: options.provider, model: options.model }
+    return { ...options }
   }
-  // A summary is a secondary request: it must not invent a route. If the
-  // session has not logged one yet there is nothing safe to summarize with,
-  // and the caller skips rather than guessing a provider.
+  // A summary is a secondary request, but it runs on the session's own terms:
+  // the same provider, model, reasoning effort and token budget. Only the
+  // route is required -- a session that has not logged one yet is skipped
+  // rather than guessed at.
   for (let index = events.length - 1; index >= 0; index -= 1) {
     if (events[index]?.type !== 'request/header') continue
     const config = events[index].data?.header?.config
     if (typeof config?.provider === 'string' && typeof config?.model === 'string') {
-      return { provider: config.provider, model: config.model }
+      return { ...config }
     }
   }
   return undefined
@@ -1284,7 +1286,7 @@ function routeOf(events, agent) {
  * is rate-limited or down must not stop the agent from working.
  *
  * @param llm - the injected llm service.
- * @param config - `{ provider, model }`, matching the session's own route.
+ * @param config - the session's own call config, from {@link routeOf}.
  * @param messages - the context to summarize, as it would be sent.
  * @param signal - abort signal from the running step.
  * @returns the summary text, or `''` when none was produced.
@@ -1298,26 +1300,14 @@ async function requestSummary(llm, config, messages, signal) {
   // Two contracts have to hold at once here, and each was found the hard way:
   //
   // 1. `prepareCall` resolves the provider's full config and the adapter refuses
-  //    any config that changed before dispatch. Spreading the caller's
-  //    `{ provider, model }` drops reasoningEffort/maxTokens and is rejected
-  //    with "prepared LLM call config changed"; `call.config` is what goes out.
-  // 2. Writing a record must not inherit the session's own reasoning effort.
-  //    Thinking is process, and its budget comes out of the answer.
-  //
-  // `off` is asked for first and abandoned when the model rejects it: not every
-  // model offers that effort, and the host then errors with UNSUPPORTED_
-  // REASONING_EFFORT before dispatch. A real run against a provider without it
-  // failed every request while the task itself completed normally, which looks
-  // exactly like the mechanism being off. Omitting the field instead lets the
-  // host apply the model's own default (`requested ?? reasoning.defaultEffort`).
-  const route = { provider: config.provider, model: config.model }
-  let call
-  try {
-    call = await llm.prepareCall({ ...route, reasoningEffort: 'off' }, signal)
-  } catch (error) {
-    if (error?.code !== 'UNSUPPORTED_REASONING_EFFORT') throw error
-    call = await llm.prepareCall(route, signal)
-  }
+  //    any config that changed before dispatch, so the call must go out with
+  //    exactly what came back from `prepareCall` -- `call.config` is what goes
+  //    out, never a partial config spread into the request.
+  // 2. The summary runs on the session's own terms: same provider, same model,
+  //    same reasoning effort, same token budget. A summary written under other
+  //    settings describes a call the agent did not make, and the panel would
+  //    report figures for that instead.
+  const call = await llm.prepareCall(config, signal)
   const requestSentAt = Date.now()
   const stream = call.stream({ ...call.config, messages: request, signal })
 
@@ -1559,7 +1549,7 @@ async function summarizeFinishedTurn(agent, llm, config, signal) {
  * else: the transport details are the same, and each was found the hard way.
  *
  * @param llm - the injected llm service.
- * @param config - `{ provider, model }`, matching the session's own route.
+ * @param config - the session's own call config, from {@link routeOf}.
  * @param messages - the context, as it would be sent.
  * @param signal - abort signal from the running turn.
  * @returns the summary text, or `''` when none was produced.
@@ -1570,14 +1560,7 @@ async function requestTurnSummary(llm, config, messages, signal) {
     ...messages,
     createUserMessage({ content: [{ type: 'text', text: turnInstruction() }] }),
   ]
-  const route = { provider: config.provider, model: config.model }
-  let call
-  try {
-    call = await llm.prepareCall({ ...route, reasoningEffort: 'off' }, signal)
-  } catch (error) {
-    if (error?.code !== 'UNSUPPORTED_REASONING_EFFORT') throw error
-    call = await llm.prepareCall(route, signal)
-  }
+  const call = await llm.prepareCall(config, signal)
   const requestSentAt = Date.now()
   const stream = call.stream({ ...call.config, messages: request, signal })
   // The turn summary is the plugin's own request, like the step's: the host

@@ -688,7 +688,8 @@ describe('summary dispatch contract', () => {
       maxTokens: 128000,
     }
     const llm = {
-      prepareCall: async () => ({
+      prepareCall: async (config) => ({
+        seen: (seen.prepared = config),
         config: resolved,
         stream: (options) => {
           seen.dispatched = options
@@ -707,7 +708,6 @@ describe('summary dispatch contract', () => {
         },
       }),
     }
-    seen.prepared = resolved
     const registered = []
     const ctx = {
       on: (event, handler) => registered.push([event, handler]),
@@ -722,7 +722,20 @@ describe('summary dispatch contract', () => {
   function session() {
     seq_counter = 0
     const events = [
-      { seq: -1, type: 'request/header', data: { header: { config: { provider: 'deepseek-official', model: 'deepseek-flash' } } } },
+      {
+        seq: -1,
+        type: 'request/header',
+        data: {
+          header: {
+            config: {
+              provider: 'deepseek-official',
+              model: 'deepseek-flash',
+              reasoningEffort: 'max',
+              maxTokens: 128000,
+            },
+          },
+        },
+      },
       ...log({ turn: 1, step: 1 }),
     ]
     return {
@@ -730,7 +743,12 @@ describe('summary dispatch contract', () => {
       appended: [],
       deriveMessages: () => [{ role: 'assistant', content: [text('done')] }],
       snapshotEvents: () => events,
-      options: { provider: 'deepseek-official', model: 'deepseek-flash' },
+      options: {
+        provider: 'deepseek-official',
+        model: 'deepseek-flash',
+        reasoningEffort: 'max',
+        maxTokens: 128000,
+      },
       // `replace` addresses a span by surface seq, so the fixture needs one.
       surface: { nodes: events.filter(e => e.type !== 'request/header').map(e => e.seq) },
       // Mirrors the real Session.append contract: a surface-eligible event
@@ -758,22 +776,17 @@ describe('summary dispatch contract', () => {
     expect(target.appended).toHaveLength(1)
   })
 
-  it('falls back when a model does not offer the requested reasoning effort', async () => {
-    // A real run against a provider without `off` failed every request with
-    // UNSUPPORTED_REASONING_EFFORT while the task itself completed normally --
-    // indistinguishable, from outside, from the mechanism being switched off.
-    // Omitting the field lets the host apply the model's own default.
+  it('asks under the session\'s own settings, never a reduced set', async () => {
+    // Regression: the summary used to demand `reasoningEffort: 'off'` and fall
+    // back to `{ provider, model }` when refused. Both describe a call the
+    // agent never made, and the panel would report that call's figures as this
+    // step's cost. The summary runs on the session's own terms instead.
     const attempts = []
     const llm = {
       prepareCall: async (config) => {
         attempts.push(config)
-        if (config.reasoningEffort !== undefined) {
-          const error = new Error('does not support reasoning effort "off"')
-          error.code = 'UNSUPPORTED_REASONING_EFFORT'
-          throw error
-        }
         return {
-          config: { provider: config.provider, model: config.model, maxTokens: 4096 },
+          config,
           stream: () => (async function* () {
             yield { type: 'block-start', index: 0, blockType: 'text' }
             yield { type: 'text-delta', index: 0, text: 'settled X' }
@@ -795,9 +808,13 @@ describe('summary dispatch contract', () => {
       { agent: { session: target }, turn: 2, step: 1 },
       () => Promise.resolve({ kind: 'enter' }),
     )
-    expect(attempts).toHaveLength(2)
-    expect(attempts[0].reasoningEffort).toBe('off')
-    expect(attempts[1].reasoningEffort).toBeUndefined()
+    expect(attempts).toHaveLength(1)
+    expect(attempts[0]).toEqual({
+      provider: 'deepseek-official',
+      model: 'deepseek-flash',
+      reasoningEffort: 'max',
+      maxTokens: 128000,
+    })
     expect(target.appended).toHaveLength(1)
   })
 
@@ -821,8 +838,8 @@ describe('summary dispatch contract', () => {
       { agent: { session: target }, turn: 2, step: 1 },
       () => Promise.resolve({ kind: 'enter' }),
     )).resolves.toBeDefined()
-    // The retry is only for the unsupported-effort case; a rate limit must not
-    // be retried as if dropping the field would help.
+    // There is nothing to retry: the call goes out once, so a rate limit
+    // must escape rather than being retried as if a different config helped.
     expect(target.appended).toHaveLength(0)
   })
 
@@ -864,8 +881,8 @@ describe('summary request bounding', () => {
   function mount(streamFactory) {
     let calls = 0
     const llm = {
-      prepareCall: async () => ({
-        config: { provider: 'p', model: 'm', reasoningEffort: 'off', maxTokens: 100 },
+      prepareCall: async (config) => ({
+        config,
         stream: () => { calls += 1; return streamFactory() },
       }),
     }
