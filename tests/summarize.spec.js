@@ -22,40 +22,62 @@ describe('summary prompt', () => {
   const prompt = summarizePrompt()
   const flat = prompt.replace(/\s+/g, ' ')
 
-  it('asks for a complete record, not a digest', () => {
-    // The summary REPLACES its step: raw material stops being replayed, so this
-    // is the only record of that step the agent sees again. An earlier version
-    // asked for "1-3 sentences" and produced summaries too thin to work from --
-    // the agent lost the thread and re-asked what it had already answered.
-    expect(flat).toContain('这是读者今后唯一会再看到的关于这一步的记录')
-    expect(flat).toContain('请写下这一步的完整记述')
-    expect(flat).toContain('长度取决于这一步推进了什么')
+  it('frames the record as a replacement for the step, not a digest of it', () => {
+    // The record REPLACES its step: raw material stops being replayed. An
+    // earlier version asked for "1-3 sentences" and produced records too thin to
+    // work from -- the agent lost the thread and re-asked what it had answered.
+    expect(flat).toContain('你正在为一个正在工作的 agent 生成最近一步的压缩替代记录')
+    expect(flat).toContain('你的输出会替代最近一步的原始工作内容')
+    expect(flat).toContain('能够替代最近一步原始内容的压缩记录')
     expect(flat).not.toContain('1-3 sentences')
   })
 
+  it('states the ceiling: length follows what the step established', () => {
+    // Records ran longer than the material they replaced -- 2.5k characters
+    // early in a session, 14k later, against tool output flat at 2-3k. The bulk
+    // was transcribed file contents and restated conclusions.
+    expect(flat).toContain('输出长度由替代最近一步所需的信息量决定')
+    expect(flat).toContain('不是由原始内容的长度、读取的文件数量或执行的命令数量决定')
+    expect(flat).toContain('原始内容已经精炼时，直接保留或轻微压缩，不要再次扩写')
+  })
+
   it('names what must survive the step', () => {
-    expect(flat).toContain('精确的标识符')
-    expect(flat).toContain('改了什么、改成了什么')
-    expect(flat).toContain('每个结论背后的证据')
-    expect(flat).toContain('被排除的做法')
-    expect(flat).toContain('尚未完成')
+    expect(flat).toContain('本步实际获得的事实、证据和结果')
+    expect(flat).toContain('本步实际作出的决定及其必要理由')
+    expect(flat).toContain('本步动作的实际执行状态')
+    expect(flat).toContain('后续工作需要的精确标识符、文件路径、函数名')
   })
 
-  it('tells the summarizer the whole context is available to it', () => {
-    expect(flat).toContain('你能看到全部上下文')
-    expect(flat).toContain('这一步对任务意味着什么')
-  })
-
-  it('scopes the answer to the last step only', () => {
-    expect(flat).toContain('如果这一步延续了那条记录所描述的事')
+  it('separates analysis work from engineering work', () => {
+    // What must survive a read is a different set from what must survive an
+    // edit; unstated, the model defaults to the union of both.
+    expect(flat).toContain('一、分析、搜索和探索类工作')
+    expect(flat).toContain('二、代码修改、文件写入和工程推进类工作')
+    expect(flat).toContain('在范围 R 内没有找到 X')
+    expect(flat).toContain('不要把“提出了方案”写成“已经完成”')
+    expect(flat).toContain('不要把“命令成功退出”写成“目标行为已经验证”')
   })
 
   it('keeps the reasoning out', () => {
     // Restating the thinking recreates, one level up, the churn this exists to
     // remove -- so what to leave out is as load-bearing as what to keep.
-    expect(flat).toContain('那是这一步的产出，属于记录的一部分')
-    expect(flat).toContain('查看事物的顺序')
-    expect(flat).toContain('不要重述任务或计划')
+    expect(flat).toContain('反复思考、自我纠结和无效推理')
+    expect(flat).toContain('得出结论之前的思考过程')
+    expect(flat).toContain('文件、资料或工具的访问顺序')
+  })
+
+  it('scopes the record to the last step and forbids new work', () => {
+    expect(flat).toContain('不要把本步发现的不确定性扩展成新的任务')
+    expect(flat).toContain('不要主动创建待办清单')
+    expect(flat).toContain('不要主动提出下一步建议')
+  })
+
+  it('forbids output that a later reader cannot act on', () => {
+    // "already done, nothing came of it" IS the finding: dropped, the next
+    // agent repeats work that already failed once.
+    expect(flat).toContain('每一步都必须输出非空记录')
+    expect(flat).toContain('不要把这种情况压缩为空文本')
+    expect(flat).toContain('不要使用“如上”“上述命令”')
   })
 })
 
