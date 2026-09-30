@@ -461,55 +461,37 @@ describe('summarize installation', () => {
       }
     }
 
-    it('appends a turn record without replacing anything', async () => {
+    it('writes no turn record, even when the summary is switched on', async () => {
       const { stopping } = mountTurn()
       const target = finishedTurn()
       await stopping({ agent: { session: target }, turn: 4, signal: undefined })
-      const appended = target.appended
-      expect(appended).toHaveLength(1)
-      expect(appended[0].type).toBe('user/message')
-      expect(appended[0].data.content[0].text).toContain('[turn summary]')
-      expect(appended[0].data.content[0].text).toContain('the turn taught X')
-      expect(appended[0].data.source.kind).toBe(SOURCE_KIND)
-      expect(appended[0].data.source.plugin).toBeUndefined()
-      // Purely an addition. A replace here would delete a span the step records
-      // already own, and `rawSeqs`/`sourceEventSeqs` have nothing to cite.
-      expect(appended[0].opts.surfaceOp).toBe('append')
-      expect(appended[0].opts.sourceEventSeqs).toBeUndefined()
-      expect(appended[0].data.summaryOfTurn).toBe(4)
-      expect(appended[0].data.summaryOf).toBeUndefined()
-      expect(appended[0].data.rawSeqs).toBeUndefined()
+      // The turn hook is currently a no-op: the feature is disabled at the code
+      // level, so turning it on changes nothing.
+      expect(target.appended).toHaveLength(0)
     })
 
-    it('asks with the turn prompt, not the step prompt', async () => {
+    it('asks the model nothing', async () => {
       const { stopping, calls } = mountTurn()
       await stopping({ agent: { session: finishedTurn() }, turn: 4, signal: undefined })
-      expect(calls).toHaveLength(1)
-      const flat = JSON.stringify(calls[0].messages)
-      expect(flat).toContain('轮')
-      // The step prompt is a replacement record; reusing it here would ask the
-      // turn's last step to be written down twice.
-      expect(flat).not.toContain('这是读者今后唯一会再看到的关于这一步的记录')
+      expect(calls).toHaveLength(0)
     })
 
-    it('writes one record per turn, however often the hook fires', async () => {
-      const { stopping } = mountTurn()
+    it('writes nothing however often the hook fires', async () => {
+      const { stopping, calls } = mountTurn()
       const target = finishedTurn()
       const hook = { agent: { session: target }, turn: 4, signal: undefined }
-      // `agent/turn-stopping` fires once per step the turn bought. Without the
-      // claim, a turn that took three steps would be written down three times.
+      // `agent/turn-stopping` fires once per step the turn bought.
       await stopping(hook)
       await stopping(hook)
       await stopping(hook)
-      expect(target.appended).toHaveLength(1)
+      expect(target.appended).toHaveLength(0)
+      expect(calls).toHaveLength(0)
     })
 
-    it('writes nothing when the model says the turn added nothing', async () => {
+    it('writes nothing when the model would have said the turn added nothing', async () => {
       const { stopping } = mountTurn('NONE')
       const target = finishedTurn()
       await stopping({ agent: { session: target }, turn: 4, signal: undefined })
-      // Most turns settle no preference, teach nothing and find no new pattern.
-      // The record is an addition, so emptiness is the normal case, not a fault.
       expect(target.appended).toHaveLength(0)
     })
 
@@ -528,7 +510,7 @@ describe('summarize installation', () => {
       expect(target.appended).toHaveLength(0)
     })
 
-    it('never lets a failure escape into the turn', async () => {
+    it('never rejects the turn', async () => {
       const registered = []
       const llm = {
         prepareCall: async () => {
@@ -543,10 +525,9 @@ describe('summarize installation', () => {
         inject: (_services, callback) => callback({ llm }),
         logger: { info: () => {}, warn: () => {} },
       }
-      apply(ctx, { stepSummary: true, turnSummary: false })
+      apply(ctx, { stepSummary: true, turnSummary: true })
       const stopping = registered.find(([e]) => e === 'agent/turn-stopping')?.[1]
-      // A record improves the next turn's context. It is never a precondition
-      // for finishing this one, so a provider failure must not reject the hook.
+      // Finishing the turn must never depend on the optional summary work.
       await expect(stopping({
         agent: { session: finishedTurn() },
         turn: 4,

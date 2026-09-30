@@ -530,14 +530,11 @@ export function apply(ctx, config) {
         const current = resolveConfig(live)
         diagnose(current.debug, `turn-stopping turn=${turn} `
           + `turnSummary=${String(current.turnSummary)} llm=${String(llm !== undefined)}`)
-        if (!current.turnSummary || llm === undefined) return
-        try {
-          await summarizeFinishedTurn(agent, llm, current, signal)
-        } catch (error) {
-          const message = String(error?.stack ?? error)
-          diagnose(current.debug, `FAILED turn: ${message.split('\n')[0]}`)
-          ctx.logger?.warn?.(`[${name}] turn summary failed: ${message}`)
-        }
+        // Turn summaries are disabled in code, not by configuration: the writer
+        // misbehaves at runtime (records still land while `turnSummary` is
+        // false), so nothing is appended here whatever the config resolves to.
+        // Delete this return together with the fix to the writer below.
+        return
       })
       if (injected?.commands !== undefined) {
         try {
