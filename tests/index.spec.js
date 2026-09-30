@@ -465,18 +465,23 @@ describe('summarize installation', () => {
       const { stopping } = mountTurn()
       const target = finishedTurn()
       await stopping({ agent: { session: target }, turn: 4, signal: undefined })
-      // The turn hook is currently a no-op: the feature is disabled at the code
-      // level, so turning it on changes nothing.
+      // The turn record stays disabled at the code level. What this hook does
+      // write is the step record, and this fixture has no surface, so its span
+      // is not addressable and even that is skipped.
       expect(target.appended).toHaveLength(0)
     })
 
-    it('asks the model nothing', async () => {
+    it("asks for the turn's closing step", async () => {
       const { stopping, calls } = mountTurn()
-      await stopping({ agent: { session: finishedTurn() }, turn: 4, signal: undefined })
-      expect(calls).toHaveLength(0)
+      const target = finishedTurn()
+      await stopping({ agent: { session: target }, turn: 4, signal: undefined })
+      // No later `agent/pre-step` belongs to this turn, so waiting for one left
+      // the closing step unwritten for as long as the gap between turns.
+      expect(calls).toHaveLength(1)
+      expect(target.appended).toHaveLength(0)
     })
 
-    it('writes nothing however often the hook fires', async () => {
+    it('asks once however often the hook fires', async () => {
       const { stopping, calls } = mountTurn()
       const target = finishedTurn()
       const hook = { agent: { session: target }, turn: 4, signal: undefined }
@@ -485,7 +490,7 @@ describe('summarize installation', () => {
       await stopping(hook)
       await stopping(hook)
       expect(target.appended).toHaveLength(0)
-      expect(calls).toHaveLength(0)
+      expect(calls).toHaveLength(1)
     })
 
     it('writes nothing when the model would have said the turn added nothing', async () => {
