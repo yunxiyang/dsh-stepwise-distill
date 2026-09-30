@@ -849,6 +849,11 @@ function timingOf(event, startedAt) {
  * chunk carries no time of its own -- the accumulator stamps one when it
  * packs deltas into a run, and only there do segment limits exist.
  *
+ * A segment that arrives whole carries no deltas and therefore no run of its
+ * own: thinking handed over as one block lands as a single `block-end`, and
+ * reading only runs left `reasoningEnd` unset on calls that plainly thought.
+ * Its own timestamp is on that chunk, so the limit is still the host's.
+ *
  * @param ends - the object to fill.
  * @param runs - `AssistantStreamAccumulator`'s snapshot of the stream.
  */
@@ -858,6 +863,9 @@ function recordRuns(ends, runs) {
       if (typeof run.time !== 'number') continue
       if (ends.first === undefined) ends.first = run.time
       if (run.chunk?.type === 'finish') ends.finish = run.time
+      if (run.chunk?.type === 'block-end' && run.chunk.block?.type === 'reasoning' && ends.reasoningEnd === undefined) {
+        ends.reasoningEnd = run.time
+      }
       continue
     }
     if (typeof run?.time0 !== 'number') continue
@@ -1244,10 +1252,23 @@ function messagesOfSeq(session) {
 }
 
 /**
- * Find the provider/model the session is running on.
+ * The fields the host treats as request-header state.
  *
- * The agent's own options are authoritative; the logged request header is the
- * fallback, because a resumed session may carry no options object.
+ * `dsh-llm` decides whether two calls run on the same route by comparing
+ * exactly these, so carrying them all is what makes a summary run on the
+ * session's own terms.
+ */
+const ROUTE_KEYS = ['provider', 'model', 'reasoningEffort', 'temperature', 'maxTokens']
+
+/**
+ * Find the call config the session itself runs on.
+ *
+ * The agent's options are authoritative, and the logged request header fills in
+ * what they leave out -- a resumed session may carry no options object, and
+ * options carry the route while leaving the reasoning effort to the provider's
+ * own default. That default is not the setting the agent's calls use: with it,
+ * a summary call can come back with no thinking at all on a session whose every
+ * other call thinks, which is a reply the session never actually makes.
  *
  * @param events - the event log.
  * @param agent - the running agent.
@@ -1256,20 +1277,20 @@ function messagesOfSeq(session) {
  */
 function routeOf(events, agent) {
   const options = agent?.options
-  if (typeof options?.provider === 'string' && typeof options?.model === 'string') {
-    return { ...options }
-  }
-  // A summary is a secondary request, but it runs on the session's own terms:
-  // the same provider, model, reasoning effort and token budget. Only the
-  // route is required -- a session that has not logged one yet is skipped
-  // rather than guessed at.
+  let header
   for (let index = events.length - 1; index >= 0; index -= 1) {
     if (events[index]?.type !== 'request/header') continue
-    const config = events[index].data?.header?.config
-    if (typeof config?.provider === 'string' && typeof config?.model === 'string') {
-      return { ...config }
-    }
+    header = events[index].data?.header?.config
+    break
   }
+  const merged = {}
+  for (const key of ROUTE_KEYS) {
+    const value = options?.[key] ?? header?.[key]
+    if (value !== undefined) merged[key] = value
+  }
+  // Only the route is required: a session that has not logged one yet is
+  // skipped rather than guessed at.
+  if (typeof merged.provider === 'string' && typeof merged.model === 'string') return merged
   return undefined
 }
 
@@ -1330,6 +1351,7 @@ async function requestSummary(llm, config, messages, signal) {
   const runs = assembler.snapshot()
   recordRuns(callTiming.ends, runs)
   const settled = assembleAssistantStream(runs, new BlockAssembler())
+  callTiming.usage = withEstimatedReasoning(callTiming.usage, settled.blocks())
   return { text: parseSummary(settled.blocks()), timing: callTiming }
 }
 
@@ -1363,6 +1385,39 @@ function usageFromChunk(element, current) {
     cacheWriteTokens: numberOr(parsed.cacheWriteTokens, 0),
     reasoningTokens: numberOr(parsed.reasoningTokens, null),
   }
+}
+
+/**
+ * Split the host's output count into thinking and answer.
+ *
+ * This route's usage carries no reasoning figure while its stream still hands
+ * the thinking over as text, so the first column had nothing to divide. The
+ * total stays the host's own number; only the split between thinking and answer
+ * is estimated, with the same calibration as {@link estimateTokens} so the two
+ * halves stay comparable to each other and to the panel's other counts.
+ *
+ * @param usage - the usage collected for the call.
+ * @param blocks - the settled blocks of that call's stream.
+ * @returns the usage, carrying a reasoning count when one could be estimated.
+ */
+function withEstimatedReasoning(usage, blocks) {
+  if (typeof usage?.reasoningTokens === 'number' && Number.isFinite(usage.reasoningTokens)) return usage
+  const outputTokens = numberOr(usage?.outputTokens, 0)
+  // Nothing was measured, so there is no total to split. Leaving the record
+  // alone keeps "no measurement" distinct from "zero of them".
+  if (outputTokens <= 0) return usage
+  const textOf = type => (Array.isArray(blocks) ? blocks : [])
+    .filter(block => block?.type === type && typeof block.text === 'string')
+    .map(block => block.text)
+    .join('\n')
+  const thinking = estimateTokens(textOf('reasoning'))
+  const answer = estimateTokens(textOf('text'))
+  if (thinking <= 0 || thinking + answer <= 0) return usage
+  // One token stays with the answer: a reasoning count that swallows the whole
+  // output would leave the second column with nothing to divide by.
+  const reasoningTokens = Math.min(outputTokens - 1, Math.round(outputTokens * thinking / (thinking + answer)))
+  if (reasoningTokens <= 0) return usage
+  return { ...usage, reasoningTokens }
 }
 
 /**
@@ -1576,6 +1631,7 @@ async function requestTurnSummary(llm, config, messages, signal) {
   const runs = assembler.snapshot()
   recordRuns(callTiming.ends, runs)
   const settled = assembleAssistantStream(runs, new BlockAssembler())
+  callTiming.usage = withEstimatedReasoning(callTiming.usage, settled.blocks())
   return { text: parseSummary(settled.blocks()), timing: callTiming }
 }
 
